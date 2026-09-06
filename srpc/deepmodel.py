@@ -21,12 +21,20 @@
     - ARC 映射：编码输入 -> 注入变换条件（固定分块正交码，直接拉动 x_L）-> 条件门控读出
       ŝ = Σ_i cond_i * W_out_i @ x_self（每个任务一个头，只更新当前条件头 -> 片段知识免遗忘）
     - 零样本组合：顺序复合两个已学变换（先 t1 读出、再以 t2 读出）—— 跨时段片段重组
+
+阶段 C 新增（软件版内在化，不变量 3：能量内生·结构稀疏）：
+    - 出生即结构稀疏：层 1 连续感受野窗口（网格局部性）、内部层/读出头/Wdyn 随机扇入
+      受限——掩码在初始化定型，局部学习只更新已有突触（*= mask），结构由构造保证；
+    - k-WTA 激活：每层保留 top-k，其余置零（结构性稀疏激活）；
+    - 三口径有效 MAC 记账（trace_energy）：事件驱动（活跃单元×已有突触）/
+      结构（全单元×已有突触）/ 稠密等价（全连接），硬件无关的内在能耗度量。
 """
 from __future__ import annotations
 
 import numpy as np
 
 from .config import DeepConfig
+from .energy import EnergyLedger
 from .memory import PrototypeMemory
 
 
@@ -34,6 +42,17 @@ def _colnorm(w: np.ndarray) -> np.ndarray:
     """列单位 L2 归一化（局部操作，防止 Hebbian 权重发散）。"""
     n = np.linalg.norm(w, axis=0, keepdims=True)
     return w / np.maximum(n, 1e-8)
+
+
+def _kwta(x: np.ndarray, frac: float) -> np.ndarray:
+    """k-WTA：保留 top-k 激活，其余置零（结构性稀疏激活，不变量 3）。"""
+    k = max(1, int(round(frac * x.size)))
+    if k >= x.size:
+        return x
+    idx = np.argpartition(x, -k)[-k:]
+    out = np.zeros_like(x)
+    out[idx] = x[idx]
+    return out
 
 
 class DeepSRPC:
@@ -59,6 +78,33 @@ class DeepSRPC:
             _colnorm(rng.uniform(0.5, 1.0, (self.dims[l - 1], self.dims[l])))
             for l in range(1, self.L + 1)
         ]
+        # --- 阶段 C：结构稀疏掩码（出生即定型；fan_in_frac=0 为稠密旧路径） ---
+        # masks[l][i, j]：层 l 单元 j 的生成野是否触及下层维 i。
+        # 层 1 = 连续感受野窗口（网格一热局部性，分块稀疏）；内部层 = 随机扇入。
+        self.masks: list[np.ndarray | None] = [None] * (self.L + 1)
+        self.colfan: list[int] = [0] * (self.L + 1)      # 每列非零数（前向记账）
+        self.rownnz: list[np.ndarray] = [None] * (self.L + 1)  # 每行非零数（反向记账）
+        for l in range(1, self.L + 1):
+            if cfg.fan_in_frac > 0:
+                k = max(1, int(round(cfg.fan_in_frac * self.dims[l - 1])))
+                m = np.zeros((self.dims[l - 1], self.dims[l]), dtype=bool)
+                if l == 1:
+                    for j in range(self.dims[l]):
+                        st = int(rng.integers(0, self.dims[0] - k + 1))
+                        m[st:st + k, j] = True
+                else:
+                    for j in range(self.dims[l]):
+                        m[rng.choice(self.dims[l - 1], size=k, replace=False), j] = True
+                self.masks[l] = m
+                self.colfan[l] = k
+                self.rownnz[l] = m.sum(axis=1).astype(float)
+                self.Ws[l] = _colnorm(self.Ws[l] * m)
+            else:
+                self.colfan[l] = self.dims[l - 1]
+                self.rownnz[l] = np.full(self.dims[l - 1], float(self.dims[l]))
+        # 掩码签名（阶段 C 验收：结构自出生不变，学习只改已有突触）
+        self.mask_sig: list = [None if m is None else hash(m.tobytes())
+                               for m in self.masks]
         # 条件门控读出头（ARC：每个变换任务一个头，ŝ = Σ_i cond_i * W_out_i @ x_self）。
         # 训练任务 i 只更新头 i -> 变换片段知识结构上免遗忘（不变量 2：能力=记忆·拼合）；
         # 组合零样本 = 顺序复用已学头（先头 t1 后头 t2），随机条件 = 多头加权混合（无信息基线）。
@@ -67,9 +113,27 @@ class DeepSRPC:
         self.last_e_out: float = 0.0
         # 变换条件嵌入（d_self, n_train）：固定分块正交码（非负、不相交支撑）
         self.Uc: np.ndarray | None = None
+        # 读出头稀疏掩码（阶段 C：每 self 维扇入受限，头创建时定型）
+        self.ro_masks: list[np.ndarray | None] = []
+        self.ro_fan: list[int] = []
+        self.ro_sig: list = []
         # 自省环动力学（x_self 的时间预测器）
         nz = self.d_self + max(n_actions, 0)
+        self.dyn_nz = nz
         self.Wdyn = rng.normal(0.0, 0.05, (self.d_self, nz))
+        self.dyn_mask: np.ndarray | None = None
+        self.dynfan = self.d_self
+        if cfg.fan_in_dyn_frac > 0:
+            kd = max(1, int(round(cfg.fan_in_dyn_frac * self.d_self)))
+            md = np.zeros((self.d_self, nz), dtype=bool)
+            for j in range(nz):
+                md[rng.choice(self.d_self, size=kd, replace=False), j] = True
+            self.dyn_mask = md
+            self.Wdyn = self.Wdyn * md
+            self.dynfan = kd
+        # 三口径 MAC 记账（阶段 C；trace 关闭时零开销）
+        self.ledger = EnergyLedger()
+        self.trace = bool(cfg.trace_energy)
 
         # 状态（非负稀疏）
         self.xs = [np.zeros(dim) for dim in self.dims]   # xs[0] 输入缓冲（不更新）
@@ -82,6 +146,31 @@ class DeepSRPC:
         self.cond: np.ndarray | None = None   # 当前变换条件
 
     # ------------------------------------------------------------------
+    # 阶段 C：三口径 MAC 记账辅助
+    # ------------------------------------------------------------------
+    def _mac3(self, key: str, event: float, struct: float, dense: float) -> None:
+        """三口径 MAC 记账：事件驱动（活跃×突触）/ 结构（全单元×突触）/ 稠密等价。"""
+        if self.trace:
+            self.ledger.add(key, event)
+            self.ledger.add(key + "_struct", struct)
+            self.ledger.add(key + "_dense", dense)
+
+    def _fwd_macs(self, l: int) -> None:
+        """层 l -> l-1 生成预测记账（preds[l-1] = Ws[l] @ xs[l]）及活跃单元数。"""
+        d_up, d_lo = self.dims[l], self.dims[l - 1]
+        n = float(np.count_nonzero(self.xs[l]))
+        fan = self.colfan[l]
+        self._mac3("fwd", n * fan, d_up * fan, float(d_up * d_lo))
+        self.ledger.add(f"act_{l}", n)
+
+    def _ro_macs(self, idx: int, n_heads: float = 1.0) -> None:
+        """读出头记账（ŝ = W_out @ x_self）。"""
+        fan = self.ro_fan[idx] if idx < len(self.ro_fan) else self.d_self
+        n = float(np.count_nonzero(self.xs[self.L]))
+        self._mac3("readout", n_heads * n * fan, n_heads * self.d_self * fan,
+                   n_heads * float(self.d_out * self.d_self))
+
+    # ------------------------------------------------------------------
     # 方向 1：forward —— 自上而下生成预测
     # ------------------------------------------------------------------
     def forward(self) -> list[np.ndarray | None]:
@@ -91,7 +180,11 @@ class DeepSRPC:
         preds[L] = self.pred_self
         for l in range(L - 1, 0, -1):
             preds[l] = Ws[l + 1] @ xs[l + 1]      # 上层对下层的生成预测
+            if self.trace:
+                self._fwd_macs(l + 1)
         preds[0] = Ws[1] @ xs[1]                  # 底层对输入的生成预测 ŝ
+        if self.trace:
+            self._fwd_macs(1)
         return preds
 
     # ------------------------------------------------------------------
@@ -111,6 +204,11 @@ class DeepSRPC:
         for l in range(1, L + 1):
             errs[l] = xs[l] - preds[l]
             up[l] = Ws[l].T @ errs[l - 1]
+            if self.trace:
+                nz_err = errs[l - 1] != 0
+                self._mac3("bwd", float(self.rownnz[l] @ nz_err),
+                           float(self.rownnz[l].sum()),
+                           float(self.dims[l - 1] * self.dims[l]))
         return errs, up
 
     # ------------------------------------------------------------------
@@ -130,6 +228,11 @@ class DeepSRPC:
         cond_mask = None
         if self.cond is not None and self.Uc is not None:
             cond_target = self.Uc @ self.cond
+            if self.trace:
+                nc = self.Uc.shape[1]
+                b = self.d_self // nc
+                self._mac3("cond", float(np.count_nonzero(self.cond)) * b,
+                           float(nc) * b, float(self.d_self * nc))
             cond_mask = cond_target > 1e-8   # 只拉条件码支撑维，其余维留给输入细节
         for l in range(1, self.L + 1):
             u = cfg.alpha * (preds[l] - self.xs[l]) + cfg.beta * up[l]
@@ -137,9 +240,15 @@ class DeepSRPC:
                 if cond_mask is not None:
                     u = u + cfg.beta_cond * cond_mask * (cond_target - self.xs[l])
                 if self.memory is not None:
-                    u = u + cfg.gamma_mem * (self.memory.recall(self.xs[l], self.group()) - self.xs[l])
+                    proto = self.memory.recall(self.xs[l], self.group())
+                    if self.trace:
+                        m_ = float(self.memory.last_macs)
+                        self._mac3("mem", m_, m_, m_)
+                    u = u + cfg.gamma_mem * (proto - self.xs[l])
             m = np.abs(u) > cfg.theta_event
             self.xs[l] = np.clip(self.xs[l] + u * m, 0.0, cfg.x_max)
+            if cfg.kwta_frac > 0:
+                self.xs[l] = _kwta(self.xs[l], cfg.kwta_frac)
             evs.append(float(m.mean()))
         return evs
 
@@ -171,9 +280,16 @@ class DeepSRPC:
         lr = cfg.eta_w * boost
         for l in range(1, self.L + 1):
             g = self.xs[l] > cfg.theta_syn
+            act = int(g.sum())
             self.Ws[l] += lr * np.outer(errs[l - 1], self.xs[l] * g)
+            if self.masks[l] is not None:
+                self.Ws[l] *= self.masks[l]      # 结构由构造保证：只更新已有突触
             np.clip(self.Ws[l], 0.0, None, out=self.Ws[l])
             self.Ws[l] = _colnorm(self.Ws[l])
+            if self.trace:
+                fan = self.colfan[l]
+                self._mac3("learn_w", act * fan, self.dims[l] * fan,
+                           float(self.dims[l - 1] * self.dims[l]))
 
     # ------------------------------------------------------------------
     # 规则 3：自省环（e_self -> 精度调制 -> Wdyn LMS -> 记忆巩固）
@@ -194,10 +310,19 @@ class DeepSRPC:
                 gate = self.last_z > cfg.theta_syn
                 self.Wdyn *= (1.0 - cfg.dyn_decay)
                 self.Wdyn += cfg.eta_dyn * np.outer(e_self, self.last_z * gate)
+                if self.dyn_mask is not None:
+                    self.Wdyn *= self.dyn_mask     # 结构由构造保证
+                if self.trace:
+                    self._mac3("learn_dyn", float(gate.sum()) * self.dynfan,
+                               float(self.dyn_nz) * self.dynfan,
+                               float(self.d_self * self.dyn_nz))
             if self.memory is not None:
                 # 置信 = 读出误差的负指数（任务执行得好 -> 信念可信 -> 巩固进记忆）
                 stable = float(np.exp(-self.last_e_out / max(self.d_out, 1.0) ** 0.5))
                 self.memory.consolidate(self.xs[self.L], stable, self.group())
+                if self.trace:
+                    m_ = float(self.memory.last_macs)
+                    self._mac3("mem", m_, m_, m_)
         return boost, float(np.linalg.norm(e_self))
 
     # ------------------------------------------------------------------
@@ -241,18 +366,26 @@ class DeepSRPC:
         """
         idx = self.head_idx()
         if idx is not None and idx < len(self.W_outs) and self.W_outs[idx] is not None:
+            if self.trace:
+                self._ro_macs(idx)
             return self.W_outs[idx] @ self.xs[self.L]
         out = np.zeros(self.d_out)
         if self.cond is not None:
+            n_heads = 0
             for i, w in enumerate(self.W_outs):
                 if w is not None and i < len(self.cond):
                     out = out + self.cond[i] * (w @ self.xs[self.L])
+                    n_heads += 1
+            if self.trace and n_heads:
+                self._ro_macs(0, float(n_heads))
         return out
 
     def learn_readout(self, s_out: np.ndarray) -> tuple[float, np.ndarray]:
         """读出学习：只更新当前条件对应的头（ΔW_out_i = lr * e ⊗ x_L，局部外积，免反传）。
 
         训练任务 i 只更新头 i -> 变换片段知识结构上免遗忘（阶段 B 里程碑）。
+        阶段 C：头创建时即定型稀疏掩码（每 self 维扇入受限），更新后 *= mask
+        —— 变换片段知识长在稀疏结构上，非稠密头裁剪。
         """
         cfg = self.cfg
         idx = self.head_idx()
@@ -261,15 +394,37 @@ class DeepSRPC:
         else:
             while len(self.W_outs) <= idx:
                 self.W_outs.append(None)
+                self.ro_masks.append(None)
+                self.ro_fan.append(0)
+                self.ro_sig.append(None)
             if self.W_outs[idx] is None:
-                self.W_outs[idx] = _colnorm(self.rng.uniform(
-                    0.0, 0.5, (len(s_out), self.d_self)))
+                W = self.rng.uniform(0.0, 0.5, (len(s_out), self.d_self))
+                if cfg.fan_in_ro_frac > 0:
+                    kro = max(1, int(round(cfg.fan_in_ro_frac * len(s_out))))
+                    m = np.zeros(W.shape, dtype=bool)
+                    for j in range(self.d_self):
+                        m[self.rng.choice(len(s_out), size=kro, replace=False), j] = True
+                    self.ro_masks[idx] = m
+                    self.ro_fan[idx] = kro
+                    self.ro_sig[idx] = hash(m.tobytes())
+                    W = _colnorm(W * m)
+                else:
+                    self.ro_fan[idx] = self.d_self
+                    W = _colnorm(W)
+                self.W_outs[idx] = W
                 self.d_out = len(s_out)
             e = s_out - (self.W_outs[idx] @ self.xs[self.L])
             if self.learning:
                 g = self.xs[self.L] > cfg.readout_gate
                 self.W_outs[idx] += cfg.eta_wout * np.outer(e, self.xs[self.L] * g)
+                if self.ro_masks[idx] is not None:
+                    self.W_outs[idx] *= self.ro_masks[idx]
                 self.W_outs[idx] = _colnorm(self.W_outs[idx])
+                if self.trace:
+                    fan = self.ro_fan[idx]
+                    self._mac3("learn_ro", float(g.sum()) * fan,
+                               float(self.d_self) * fan,
+                               float(self.d_out * self.d_self))
         self.last_e_out = float(np.linalg.norm(e))
         return self.last_e_out, e
 
@@ -328,8 +483,17 @@ class DeepSRPC:
         self.last_z = z
         if self.self_loop:
             p = self.Wdyn @ z
+            if self.trace:
+                self._mac3("dyn", float(np.count_nonzero(z)) * self.dynfan,
+                           float(self.dyn_nz) * self.dynfan,
+                           float(self.d_self * self.dyn_nz))
             if self.cond is not None and self.Uc is not None:
                 p = p + cfg.beta_cond * (self.Uc @ self.cond)
+                if self.trace:
+                    nc = self.Uc.shape[1]
+                    b = self.d_self // nc
+                    self._mac3("cond", float(np.count_nonzero(self.cond)) * b,
+                               float(nc) * b, float(self.d_self * nc))
             self.pred_self = np.clip(p, 0.0, cfg.x_max)
         else:
             self.pred_self = self.xs[self.L].copy()

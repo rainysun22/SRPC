@@ -33,19 +33,26 @@ class PrototypeMemory:
         self.n_fast = np.zeros(cfg.n_fast, dtype=int)  # 槽写入次数
         self.slow: dict[int, np.ndarray] = {}          # group -> (n_slow_group, d)
         self.n_slow: dict[int, np.ndarray] = {}        # group -> 写入次数
+        self.last_macs = 0.0                           # 最近一次读/写的 MACs（记账）
 
     # ------------------------------------------------------------------
     # 读取：最近激活原型（slow 同组优先；否则 fast）
     # ------------------------------------------------------------------
     def recall(self, x: np.ndarray, group: int | None = None) -> np.ndarray:
-        """返回最近激活原型作为 top-down 先验（无原型时返回零向量）。"""
+        """返回最近激活原型作为 top-down 先验（无原型时返回零向量）。
+
+        last_macs：本次调用的距离计算 MACs（槽数 × 维度，阶段 C 记账）。
+        """
+        self.last_macs = 0.0
         if group is not None and group in self.slow:
             protos, counts = self.slow[group], self.n_slow[group]
+            self.last_macs += float(protos.shape[0] * self.d)
             if int(counts.sum()) > 0:
                 d = np.linalg.norm(protos - x, axis=1)
                 d[np.where(counts == 0)[0]] = np.inf
                 return protos[int(np.argmin(d))].copy()
         if int(self.n_fast.sum()) > 0:
+            self.last_macs += float(self.fast.shape[0] * self.d)
             d = np.linalg.norm(self.fast - x, axis=1)
             d[np.where(self.n_fast == 0)[0]] = np.inf
             return self.fast[int(np.argmin(d))].copy()
@@ -60,12 +67,15 @@ class PrototypeMemory:
 
         stable ∈ [0,1] 为置信（自省误差小则高）；低于 conf_thresh 不写入
         （避免噪声信念污染记忆）。WTA：只更新最近槽。
+        last_macs：本次写入的距离计算 MACs（阶段 C 记账）。
         """
         cfg = self.cfg
+        self.last_macs = 0.0
         if stable < cfg.conf_thresh:
             return
 
         # ---- fast：工作记忆（可快速覆盖，不分组） ----
+        self.last_macs += float(self.fast.shape[0] * self.d)
         empty = np.where(self.n_fast == 0)[0]
         if len(empty) > 0:
             k = int(empty[0])
@@ -85,6 +95,7 @@ class PrototypeMemory:
             self.n_slow[group] = np.zeros(self.n_slow_group, dtype=int)
         protos, counts = self.slow[group], self.n_slow[group]
         if self.n_fast[k] >= 2:
+            self.last_macs += float(protos.shape[0] * self.d)
             empty2 = np.where(counts == 0)[0]
             if len(empty2) > 0:
                 k2 = int(empty2[0])

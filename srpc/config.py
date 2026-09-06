@@ -149,6 +149,12 @@ class DeepConfig:
     beta_cond: float = 0.80
     eta_wout: float = 0.08      # 读出层 W_out 学习率（输入->输出映射）
     readout_gate: float = 1e-2  # 读出学习突触前活跃门限
+    # --- 阶段 C：结构稀疏（出生即定型，非训练后裁剪；0/False = 稠密旧路径） ---
+    fan_in_frac: float = 0.0      # 生成权重每列扇入占比（层1=连续感受野窗口，内部层=随机扇入）
+    fan_in_ro_frac: float = 0.0   # 读出头每 self 维扇入占比
+    fan_in_dyn_frac: float = 0.0  # 自省动力学 Wdyn 每列扇入占比
+    kwta_frac: float = 0.0        # k-WTA：每层保留 top-k 激活占比（结构性稀疏激活）
+    trace_energy: bool = False    # 有效 MAC 记账（三口径：事件驱动/结构/稠密等价）
 
 
 @dataclass
@@ -202,3 +208,34 @@ class AcceptanceBConfig:
     forget_rel_max: float = 0.25        # 免遗忘：带记忆时旧任务误差相对回升 <= 25%
     retain_gain_min: float = 0.10       # 记忆增益：保留误差相对无记忆改善 >= 10%
     combo_gain_min: float = 0.20        # 组合嵌入相对随机条件的零样本增益 >= 20%
+
+
+# ----------------------------------------------------------------------
+# 阶段 C（软件版内在化）：结构稀疏核心 + 能耗记账 + 能力复验
+# 对应 docs/SRPC_DESIGN.md 不变量 3（能量内生·结构稀疏）与 6.1b（大模型能效对照）；
+# 硬件部署本体（事件驱动/低比特芯片）deferred 至有专用硬件时
+# ----------------------------------------------------------------------
+
+@dataclass
+class PhaseCConfig:
+    """阶段 C 实验协议（无专用硬件，CPU/GPU 软件验证）。
+
+    核心：出生即结构稀疏（扇入受限分块权重 + k-WTA）的核心从头重训，
+    复跑阶段 B 全部验收（能力无回撤 = 低功耗来自架构本身，非稠密裁剪），
+    并以硬件无关的有效 MAC 记账对比大模型标尺。
+    """
+
+    yardstick_params: tuple = (0.5e9, 1.5e9, 7e9)   # 大模型标尺参数量（6.1b 对照线）
+    yardstick_names: tuple = ("LLM-0.5B", "LLM-1.5B", "LLM-7B")
+    tokens_per_task: int = 512      # 大模型单任务推理 token 数（网格序列化+指令+输出）
+    quant_bits: int = 8             # 低比特部署就绪检查（训练后权重量化）
+
+
+@dataclass
+class AcceptanceCConfig:
+    """阶段 C 可证伪里程碑（第 8 节 C 行，软件版）量化阈值。"""
+
+    llm_ratio_min: float = 1e3          # C2：每样本推理 MACs 比最小标尺低 >= 10^3 倍
+    density_max: float = 0.35           # C3：权重总密度上限（出生即稀疏，由构造保证）
+    quant_err_ratio_max: float = 1.5    # C4：int8 量化后冻结误差 <= fp 的 1.5 倍
+    # C1 能力无回撤 = 稀疏核心上阶段 B 四项验收全部复现（复用 AcceptanceBConfig）

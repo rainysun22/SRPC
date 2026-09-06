@@ -4,6 +4,7 @@ Self-Reflective Predictive Coding：从"最小化预测误差"这一条内置规
 
 - **阶段 A（Phase-0 原型）**：原理自证 —— 形成、修正、组合的最小闭环
 - **阶段 B（规模化与组合）**：深层预测编码（DeepSRPC）、多时间尺度记忆（PrototypeMemory）、ARC-lite 组合基准、顺序学习免遗忘
+- **阶段 C（内在低功耗，软件版）**：出生即结构稀疏（分块/扇入受限 + k-WTA）+ 三口径 MAC 记账 + 大模型能效标尺 + int8 部署就绪 —— 低功耗是架构本身的属性，非训练后裁剪
 
 ## 核心特性
 
@@ -16,6 +17,9 @@ Self-Reflective Predictive Coding：从"最小化预测误差"这一条内置规
 - **规模化（阶段 B）**：可配置 L 层深层预测编码网络，forward（自上而下生成）与 backward_error（自下而上只传误差）方向严格分离
 - **多时间尺度记忆（阶段 B）**：fast 工作记忆 + 按任务分组的 slow 长期记忆，WTA 稀疏写入，结构上免遗忘
 - **组合泛化（阶段 B）**：ARC-lite 8×8 网格变换基准；保留组合零样本 = 顺序复用两个已学变换片段（条件门控读出头）重组出新变换
+- **出生即结构稀疏（阶段 C）**：扇入受限权重掩码（层 1 连续感受野 / 内部随机扇入）+ k-WTA 激活，自出生定型、训练只改已有突触（非训练后裁剪）
+- **三口径 MAC 能耗记账（阶段 C）**：事件驱动（活跃单元 × 已有突触）/ 结构（全单元 × 已有突触）/ 稠密等价，硬件无关的架构内在能耗度量，直接对比大模型标尺（N_params × n_tokens）
+- **int8 部署就绪（阶段 C）**：训练后对称量化，冻结评估能力无回撤；事件驱动/神经形态芯片本体 deferred 至有专用硬件
 
 ## 目录结构
 
@@ -29,16 +33,21 @@ srpc/
   arc.py         # ArcLite（阶段 B）：ARC-lite 组合基准
   runner.py      # 实验编排与验收判定（阶段 A）
   runner_b.py    # 顺序学习免遗忘 + 组合零样本 + 验收判定（阶段 B）
+  runner_c.py    # 阶段 C 主流程：稀疏/稠密双臂 + 能耗测量 + C1-C4 验收
+  energy.py      # EnergyLedger 三口径 MAC 记账 + 大模型标尺 llm_task_macs（阶段 C）
   metrics.py     # 指标：感受野对齐、NMI、恢复统计、零样本组合泛化
   plots.py       # 可视化（阶段 A）
   plots_b.py     # 可视化（阶段 B）
+  plots_c.py     # 可视化（阶段 C：结构/能耗/能力/活跃率）
 scripts/
   run_phase0.py  # 阶段 A 入口：跑全部实验并生成验收报告
   run_phaseB.py  # 阶段 B 入口：顺序学习 + 组合泛化 + Pareto 回归验收
+  run_phaseC.py  # 阶段 C 入口：结构稀疏核心双臂 + 能耗/结构/量化验收
 docs/
   SRPC_DESIGN.md  # 设计文档 v1.4（§7.5 阶段 A 六项验收 / §8 里程碑）
 results/          # 阶段 A：自动生成的图表 / metrics.json / report.md
 results_phaseB/   # 阶段 B：同上
+results_phaseC/   # 阶段 C：同上
 ```
 
 ## 快速开始
@@ -48,10 +57,11 @@ pip install numpy matplotlib
 python scripts/run_phase0.py              # 阶段 A：默认 3 seeds，约 30–60s
 python scripts/run_phaseB.py              # 阶段 B：默认 3 seeds，约 35s
 python scripts/run_phaseB.py --regression # 阶段 B + Phase-0 Pareto 回归（A 指标不退化）
-python scripts/run_phaseB.py --steps 200  # 冒烟测试
+python scripts/run_phaseC.py              # 阶段 C：稀疏/稠密双臂 + C1-C4 验收，约 52s
+python scripts/run_phaseC.py --steps 200  # 冒烟测试
 ```
 
-运行后自动生成 `results/report.md`、`results_phaseB/report.md`（验收报告）与图表。
+运行后自动生成 `results/report.md`、`results_phaseB/report.md`、`results_phaseC/report.md`（验收报告）与图表。
 
 ## 验收结果（阶段 A，3 seeds 均值）
 
@@ -80,7 +90,21 @@ python scripts/run_phaseB.py --steps 200  # 冒烟测试
 
 补充：事件驱动更新率 mem 0.051 vs no-mem 0.246（记忆先验使编码更稀疏）；完整报告见 [results_phaseB/report.md](results_phaseB/report.md)。
 
+## 验收结果（阶段 C 软件版，3 seeds，每个 seed 都必须通过）
+
+> 对照 v1.4 §8 里程碑 C 的软件版（无专用硬件，CPU/GPU 验证**架构本身**的低功耗）：出生即稀疏核心从头重训，能力与能效双验收；事件驱动/神经形态芯片部署本体 deferred 至有专用硬件。对照臂 = 同 seeds 同超参的稠密网络（只开记账）。
+
+| 里程碑 | 结果 | 关键证据 |
+|---|---|---|
+| C1 能力无回撤（B 复跑） | PASS | 稀疏核心上阶段 B 四项验收全部复现（组合增益 41%） |
+| C2 能效（vs 大模型标尺） | PASS | 每样本推理 8.63e4 MACs（事件驱动）vs LLM-0.5B 2.56e11（最低比率 3e6 倍，阈值 ≥10³） |
+| C3 结构由构造保证 | PASS | 权重总密度 0.280（阈值 ≤0.35），掩码自出生不变（学习只改已有突触） |
+| C4 int8 部署就绪 | PASS | 量化后冻结误差 0.099 vs fp 0.098；组合 0.103 vs 0.100（无回撤） |
+
+补充：结构口径（架构内在能耗主度量）稀疏核心比稠密对照臂**节省 74%**；与自身稠密等价比节省 89%。事件口径臂间对比不可直接比（稠密臂内部层事件静默、信息流微弱，稀疏核心 k-WTA 保证内部层真实活跃 12–38%）——详见 [results_phaseC/report.md](results_phaseC/report.md) 的口径解读。
+
 ## A/B 实验设计
 
 所有 Track-1 结论均来自**自省环 ON vs OFF** 的受控对照（同种子同环境，仅切换 `self_loop`），扰动测试采用全局感觉重映射（感知维度随机置换），不存在"回避扰动区"的捷径。
 阶段 B 免遗忘/记忆增益为**带记忆 vs 无记忆**对照（同种子同环境，仅切换 `memory`）；组合零样本为**正确条件顺序复合 vs 无信息均匀条件多头混合**对照，保留组合在训练中完全不可见。
+阶段 C 能效对照为**出生即稀疏核心 vs 同 seeds 同超参稠密网络**（仅结构掩码与 k-WTA 不同）；大模型标尺（N_params × n_tokens）仅为比较基准，不进入系统构造。

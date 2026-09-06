@@ -88,8 +88,13 @@ def run_sequential(seed: int, with_memory: bool,
     diag = np.zeros(n_tasks)
     curves: list[np.ndarray] = []  # 每任务内 EMA 误差序列（能力上升）
     event_rates = []               # 每任务内事件率均值（不变量 3 能量代理）
+    # 阶段 C：训练/评估分段能耗（trace 关闭时 ledger 恒为 0，零开销零影响）
+    macs_keys = ("event", "struct", "dense")
+    train_macs = {k: 0.0 for k in macs_keys}
+    eval_macs = {k: 0.0 for k in macs_keys}
 
     for j, name in enumerate(arc.train_names):
+        model.ledger.reset()
         ema_val = 0.0
         ev_accum = 0.0
         curve = np.empty(per_task)
@@ -102,18 +107,30 @@ def run_sequential(seed: int, with_memory: bool,
             ev_accum += float(np.mean(info.get("evs", [0.0])))
         curves.append(curve)
         event_rates.append(ev_accum / per_task)
+        t_ = model.ledger.totals()
+        for k in macs_keys:
+            train_macs[k] += t_[k]
         # 冻结评估所有已见任务（backward transfer）
         model.set_learning(False)
+        model.ledger.reset()
         for i in range(j + 1):
             R[i, j] = eval_task(model, arc, arc.train_names[i], clcfg, seed)
+        t_ = model.ledger.totals()
+        for k in macs_keys:
+            eval_macs[k] += t_[k]
         model.set_learning(True)
         diag[j] = R[j, j]
 
     # 组合零样本评估（学完全部任务后）
+    model.ledger.reset()
     combo = eval_combination(model, arc, clcfg, seed)
+    t_ = model.ledger.totals()
+    for k in macs_keys:
+        eval_macs[k] += t_[k]
     return dict(R=R, diag=diag, curves=curves, event_rates=event_rates,
                 combo=combo, model=model, mem=mem,
-                task_names=arc.train_names, novel_names=arc.novel_names)
+                task_names=arc.train_names, novel_names=arc.novel_names,
+                train_macs=train_macs, eval_macs=eval_macs)
 
 
 def forget_stats(R: np.ndarray, diag: np.ndarray) -> dict:
