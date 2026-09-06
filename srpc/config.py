@@ -109,3 +109,96 @@ class AcceptanceConfig:
     nmi_p_max: float = 0.05          # 概念层-上下文 NMI 的置换检验 p 值上限
     slope_max: float = 0.0           # 预测误差 EMA 斜率必须 < 0（随交互下降）
     self_gain_min_frac: float = 0.10  # 自省环开启后扰动重学误差至少低 10%（A/B 主指标）
+
+
+# ----------------------------------------------------------------------
+# 阶段 B（规模化与组合）：DeepSRPC / 多时间尺度记忆 / ARC-lite / 顺序学习
+# 对应 docs/SRPC_DESIGN.md 第 8 节里程碑 B
+# ----------------------------------------------------------------------
+
+@dataclass
+class DeepConfig:
+    """阶段 B 深层预测编码网络（规模化：Phase-0 的 3 层 -> 可配置 L 层）。
+
+    dims[0] 为输入维（s），dims[-1] 为自我层维（x_self），内部层数 L = len(dims)-1。
+    自上而下生成预测、自下而上只传误差；事件驱动稀疏（不变量 3）；
+    自省环 + 记忆先验 + 变换条件经顶层接入（不变量 4 / 阶段 B 里程碑）。
+    """
+
+    dims: tuple = (256, 160, 128, 112, 128)  # 输入维(网格一热) + 内部层维 + 自我层维
+    x_max: float = 5.0
+    inner_iters: int = 3
+    # 规则 1：局部推断（稀疏/事件驱动）
+    alpha: float = 0.15
+    beta: float = 0.25
+    theta_event: float = 0.01
+    # 规则 2：局部 Hebbian 学习（免反传）
+    eta_w: float = 0.05
+    theta_syn: float = 1e-2
+    # 规则 3：自省环
+    eta_dyn: float = 0.03
+    dyn_decay: float = 1e-3
+    kappa_boost: float = 1.5
+    boost_max: float = 6.0
+    ema_self_rate: float = 0.005
+    # 阶段 B：多时间尺度记忆先验（顶层拉动，按任务分组免遗忘）
+    gamma_mem: float = 0.35
+    # 阶段 B：ARC 变换条件先验。
+    # Uc 为固定分块正交码（非负、不相交支撑 -> 任务编码天然分离，见 set_condition）；
+    # 条件直接拉动 x_self 更新（beta_cond 为拉动强度），变换知识由读出层 W_out 学习。
+    beta_cond: float = 0.80
+    eta_wout: float = 0.08      # 读出层 W_out 学习率（输入->输出映射）
+    readout_gate: float = 1e-2  # 读出学习突触前活跃门限
+
+
+@dataclass
+class MemoryConfig:
+    """阶段 B 多时间尺度原型记忆（免遗忘结构，不变量 2：能力=记忆·拼合）。
+
+    fast 槽：工作记忆，学习率快，可快速覆盖（当前会话/任务）；
+    slow 槽：长期记忆，按任务分组（n_slow_group 个/组），学习率慢，
+    只在"稳定/重复"时小幅巩固；顺序学习新任务只写新任务的组，
+    旧任务原型固化在旧组 -> 结构上免遗忘（新任务不破坏旧任务）。
+    """
+
+    d: int = 12
+    n_fast: int = 12
+    n_slow_group: int = 2       # 每任务组的长期记忆槽数
+    rate_fast: float = 0.15
+    rate_slow: float = 0.01
+    conf_thresh: float = 0.30   # 自省误差小（stable>=thresh）才巩固
+
+
+@dataclass
+class ArcConfig:
+    """阶段 B 组合基准：ARC-lite（8x8 网格变换任务 + 保留组合零样本）。
+
+    训练变换作为顺序学习任务序列；novel_combos 为两个已知变换的组合
+    （训练不可见），验证"既有片段重组出新概念"（阶段 B 里程碑）。
+    """
+
+    grid: int = 8
+    n_colors: int = 4           # 0=空, 1..3 颜色
+    n_blocks: int = 3           # 每输入随机放置的块数上限
+    max_block: int = 2          # 块最大边长
+    train_transforms: tuple = ("flip_h", "flip_v", "rot90", "recolor")
+    novel_combos: tuple = (("flip_h", "rot90"), ("recolor", "flip_v"))
+
+
+@dataclass
+class CLConfig:
+    """阶段 B 顺序学习（免遗忘）协议。"""
+
+    steps_per_task: int = 800   # 每个变换任务的训练步数
+    eval_samples: int = 24      # 冻结评估每任务采样数
+    settle: int = 6             # 评估收敛步（跳过瞬态）
+
+
+@dataclass
+class AcceptanceBConfig:
+    """阶段 B 可证伪里程碑（第 8 节）量化阈值。"""
+
+    learn_slope_max: float = 0.0        # 能力上升：任务内误差 EMA 斜率 < 0
+    forget_rel_max: float = 0.25        # 免遗忘：带记忆时旧任务误差相对回升 <= 25%
+    retain_gain_min: float = 0.10       # 记忆增益：保留误差相对无记忆改善 >= 10%
+    combo_gain_min: float = 0.20        # 组合嵌入相对随机条件的零样本增益 >= 20%
