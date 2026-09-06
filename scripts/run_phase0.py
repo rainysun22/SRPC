@@ -21,13 +21,13 @@ import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from srpc import (AcceptanceConfig, FieldConfig, ModelConfig, SlotConfig,
-                  Track1Config, Track2Config, evaluate_acceptance, run_track1,
-                  run_track2)
+from srpc import (AcceptanceConfig, CreditConfig, FieldConfig, ModelConfig,
+                  SlotConfig, Track1Config, Track2Config, evaluate_acceptance,
+                  run_credit_screen, run_track1, run_track2)
 from srpc.plots import make_all
 
 
-def build_report(t1, t2, acc, figs, elapsed):
+def build_report(t1, t2, cr, acc, figs, elapsed):
     a = acc
     on1, off1 = t1["on"]["metrics_mean"], t1["off"]["metrics_mean"]
     on2 = t2["on"]["metrics_mean"]
@@ -59,6 +59,13 @@ def build_report(t1, t2, acc, figs, elapsed):
         f"{a['self_reflection']['steady_post_off']:.4f} |",
         f"| 4 无反传·在线 | {'PASS' if a['no_backprop_online']['pass_'] else 'FAIL'} | "
         f"纯 NumPy 局部规则；逐样本在线更新 |",
+        f"| 5 信用分配早筛（§8.5 承重墙） | {'PASS' if a['credit_screen']['pass_'] else 'FAIL'} | "
+        f"延迟 Δ={cr['metrics_mean']['delay']:.0f}：误差驱动 {a['credit_screen']['acc_pcn']:.3f} vs "
+        f"纯相关 {a['credit_screen']['acc_hebb']:.3f}（机会 0.5，分离 "
+        f"{a['credit_screen']['acc_gap']:.3f}）；远端权重驱动 "
+        f"{a['credit_screen']['distal_pcn']:.3f}（机会 0.20）；"
+        f"Δ=1 对照：误差驱动 {a['credit_screen']['acc_pcn_d1']:.3f} vs 纯相关 "
+        f"{a['credit_screen']['acc_hebb_d1']:.3f}（两者皆可学）|",
         "",
         "## 补充指标（7.4 组合 / 不变量 3 能量）",
         "",
@@ -98,14 +105,17 @@ def main():
     scfg = SlotConfig()
     t2cfg = Track2Config()
 
-    print("[1/3] Track-1 交互式导航（形成/修正/自省 A/B）...")
+    print("[1/4] Track-1 交互式导航（形成/修正/自省 A/B）...")
     t1 = run_track1(seeds=args.seeds, mcfg=mcfg, fcfg=fcfg, tcfg=t1cfg)
-    print("[2/3] Track-2 组合流（组合泛化 + 基线 + 自省增益）...")
+    print("[2/4] Track-2 组合流（组合泛化 + 基线 + 自省增益）...")
     slot_seeds = args.slot_seeds or args.seeds[:2]
     t2 = run_track2(seeds=slot_seeds, mcfg=mcfg, scfg=scfg, t2cfg=t2cfg)
+    print("[3/4] 信用分配早筛（§8.5 承重墙：延迟关联，误差驱动 vs 纯相关）...")
+    ccfg = CreditConfig()
+    cr = run_credit_screen(seeds=args.seeds, ccfg=ccfg)
 
-    print("[3/3] 验收评估与绘图...")
-    acc = evaluate_acceptance(t1, t2, AcceptanceConfig())
+    print("[4/4] 验收评估与绘图...")
+    acc = evaluate_acceptance(t1, t2, AcceptanceConfig(), cr, ccfg)
     out = pathlib.Path(args.out)
     figs = make_all(t1, t2, t1cfg.perturb_step, str(out))
 
@@ -117,10 +127,10 @@ def main():
                     for k, v in t1.items() if k != "seeds"},
             track2={k: {kk: vv for kk, vv in v.items() if kk != "runs"}
                     for k, v in t2.items() if k != "seeds"},
-            acceptance=acc, elapsed_sec=elapsed,
+            credit_screen=cr, acceptance=acc, elapsed_sec=elapsed,
         ), f, ensure_ascii=False, indent=2, default=float)
     with open(out / "report.md", "w", encoding="utf-8") as f:
-        f.write(build_report(t1, t2, acc, figs, elapsed))
+        f.write(build_report(t1, t2, cr, acc, figs, elapsed))
 
     print("\n===== 7.5 验收结论 =====")
     for k, v in acc.items():

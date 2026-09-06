@@ -38,6 +38,12 @@ class ModelConfig:
     curiosity: float = 3.0        # 主动推理的认识价值项系数：少试的动作按 1/sqrt(n) 折价探索
     # --- 7.2 模块 4：全局工作空间（MVP：高置信收敛信念子集） ---
     ws_k: int = 4              # 广播的 top-k 信念
+    # --- 结构性稀疏（不变量 3：阶段 A 起就是核心算子的数学形式，非训练后裁剪） ---
+    # 阶段 A 网络小（24/16/16 维），密度 0.75 维持自组织稳定性（3 seeds 自省增益全过）；
+    # 阶段 B 网络大（160/128/112），DeepConfig 用 0.25 已验。
+    fan_in_frac: float = 0.75     # 生成权重每列扇入占比（层1=连续感受野窗口，内部层=随机扇入）
+    fan_in_dyn_frac: float = 0.75 # 自省动力学 Wdyn 每列扇入占比
+    kwta_frac: float = 0.5        # k-WTA：每层保留 top-k 激活占比（结构性稀疏激活）
 
 
 @dataclass
@@ -100,6 +106,54 @@ class Track2Config:
 
 
 @dataclass
+class CreditConfig:
+    """§8.5 信用分配早筛（承重墙）任务与验收阈值（阶段 A 通过条件第 2 项）。
+
+    任务：延迟 XOR —— 目标 y_t = XOR(bit0(x_{t-Δ}), bit1(x_{t-Δ}))，
+    输入为最近 Δ+1 步窗口拼接，远端块（t-Δ）为唯一任务相关块、其余块
+    为随机干扰（每步 2 维 = 双峰 bit 对；干扰来自其它时间块）。XOR 目标
+    与任何单一输入特征零边际相关（纯相关 Hebbian 必然失败），且线性不可分
+    （输出必须为 one-hot 双输出单元）。
+    网络与 Phase-0 同一套 7.3 局部规则（出生即稀疏：掩码 + k-WTA）；
+    对照 = 纯相关 Hebbian（§2.4：朴素 Hebbian ≠ 误差驱动 PCN）。
+    判据：误差驱动显著优于纯相关（误差机制承载信用分配），且误差能量
+    回传驱动远端权重（远端块权重变化占比 > 机会水平 1/(Δ+1)）。
+    """
+
+    # 任务几何
+    d_feat: int = 2                # 每步特征维（前两维为双峰 bit；其余块为随机干扰）
+    delay: int = 4                 # 长程延迟 Δ（目标取决于 Δ 步前的输入）
+    # 网络（x0 -> x1 -> x2 -> one-hot 输出，与 Phase-0 感官通路同构）
+    h1: int = 128                  # L1 隐层维度（时间分块感受野）
+    h2: int = 64                   # L2 隐层维度（随机扇入，联合特征层）
+    x_max: float = 5.0
+    settle_iters: int = 15         # 局部推断收敛迭代（误差回传的深度）
+    # 7.3 规则 1 系数：顶层类拉动 α 必须 >> 底层重建 β（XOR 类条件均值相同，
+    # 重建误差无法分位，类分离只能由 top-down 原型拉动提供）
+    alpha: float = 0.60
+    beta: float = 0.10
+    theta_event: float = 0.01
+    eta_out: float = 0.1           # 自由输出模式下 x3 的推断步长
+    # 7.3 规则 2
+    eta_w: float = 0.05            # 权重学习率（信用分配臂调优值）
+    theta_syn: float = 1e-2
+    # 不变量 3：出生即结构稀疏（阶段 A 密度 0.75 维持自组织稳定性）
+    fan_in_frac: float = 0.75
+    kwta_frac: float = 0.5
+    kwta_on: bool = True
+    predict_mode: str = "compare"  # "compare" 钳制-比较 / "free" 自由推断+读出头
+    energy_mode: str = "class"     # 分类比较口径："full"=e0+e1+e2 / "class"=e1+e2（排除类无关重建噪声）
+    # 协议
+    train_steps: int = 10000
+    eval_steps: int = 500
+    # 验收阈值（§8.5：需量化阈值；承重墙 = 承重墙，早筛不过立即回头）
+    acc_pcn_min: float = 0.80      # 误差驱动在长程延迟上准确率 >= 80%（机会 50%）
+    acc_hebb_max: float = 0.68     # 纯相关必须 <= 68%（否则判据不具区分力）
+    acc_gap_min: float = 0.30      # 误差驱动 - 纯相关 >= 30 个百分点
+    distal_share_min: float = 0.25 # 远端块权重变化占比 >= 25%（机会水平 20%）
+
+
+@dataclass
 class AcceptanceConfig:
     """7.5 验收标准的量化阈值（阶段 A 通过条件）。"""
 
@@ -149,12 +203,13 @@ class DeepConfig:
     beta_cond: float = 0.80
     eta_wout: float = 0.08      # 读出层 W_out 学习率（输入->输出映射）
     readout_gate: float = 1e-2  # 读出学习突触前活跃门限
-    # --- 阶段 C：结构稀疏（出生即定型，非训练后裁剪；0/False = 稠密旧路径） ---
-    fan_in_frac: float = 0.0      # 生成权重每列扇入占比（层1=连续感受野窗口，内部层=随机扇入）
-    fan_in_ro_frac: float = 0.0   # 读出头每 self 维扇入占比
-    fan_in_dyn_frac: float = 0.0  # 自省动力学 Wdyn 每列扇入占比
-    kwta_frac: float = 0.0        # k-WTA：每层保留 top-k 激活占比（结构性稀疏激活）
-    trace_energy: bool = False    # 有效 MAC 记账（三口径：事件驱动/结构/稠密等价）
+    # --- 结构性稀疏（不变量 3：从阶段 A/B 起就是核心算子的数学形式，非训练后裁剪） ---
+    # 出生即定型掩码 + k-WTA 激活；学习只更新已有突触（*= mask），结构由构造保证。
+    fan_in_frac: float = 0.25     # 生成权重每列扇入占比（层1=连续感受野窗口，内部层=随机扇入）
+    fan_in_ro_frac: float = 0.40  # 读出头每 self 维扇入占比
+    fan_in_dyn_frac: float = 0.25 # 自省动力学 Wdyn 每列扇入占比
+    kwta_frac: float = 0.50       # k-WTA：每层保留 top-k 激活占比（结构性稀疏激活）
+    trace_energy: bool = False    # 有效 MAC 记账（阶段 C 部署度量；默认关，零开销）
 
 
 @dataclass

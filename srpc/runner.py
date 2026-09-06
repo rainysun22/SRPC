@@ -10,8 +10,8 @@ import pathlib
 
 import numpy as np
 
-from .config import (AcceptanceConfig, FieldConfig, ModelConfig, SlotConfig,
-                     Track1Config, Track2Config)
+from .config import (AcceptanceConfig, CreditConfig, FieldConfig, ModelConfig,
+                     SlotConfig, Track1Config, Track2Config)
 from .env import N_FIELD_ACTIONS, SlotWorld, SourceFieldWorld
 from .metrics import (best_cosine, cosine, ema, linreg_slope, nmi,
                       nmi_perm_pvalue, recovery_stats)
@@ -337,7 +337,10 @@ def check_online_incremental() -> bool:
     return bool(changed and no_buffer)
 
 
-def evaluate_acceptance(t1: dict, t2: dict, acfg: AcceptanceConfig | None = None) -> dict:
+def evaluate_acceptance(t1: dict, t2: dict, acfg: AcceptanceConfig | None = None,
+                        cr: dict | None = None,
+                        ccfg: CreditConfig | None = None) -> dict:
+    """7.5 验收标准。cr 为信用分配早筛结果（§8.5，None 则跳过该条件）。"""
     acfg = acfg or AcceptanceConfig()
     crit = {}
 
@@ -392,6 +395,28 @@ def evaluate_acceptance(t1: dict, t2: dict, acfg: AcceptanceConfig | None = None
     c4 = dict(no_backprop=nb, bad_tokens=bad,
               online_incremental=check_online_incremental())
     crit["no_backprop_online"] = dict(pass_=bool(nb and c4["online_incremental"]), **c4)
+
+    # ---- 条件 5：信用分配早筛（§2.4 / §7.5-2 / §8.5，承重墙） ----
+    if cr is not None:
+        ccfg = ccfg or CreditConfig()
+        per = cr["per_seed"]
+        m = cr["metrics_mean"]
+        ok = dict(
+            pcn=[p["acc_pcn"] >= ccfg.acc_pcn_min for p in per],
+            hebb=[p["acc_hebb"] <= ccfg.acc_hebb_max for p in per],
+            gap=[p["acc_gap"] >= ccfg.acc_gap_min for p in per],
+            distal=[p["distal_pcn"] >= ccfg.distal_share_min for p in per],
+        )
+        c5 = dict(acc_pcn=m["acc_pcn"], acc_hebb=m["acc_hebb"], acc_gap=m["acc_gap"],
+                  distal_pcn=m["distal_pcn"], distal_hebb=m["distal_hebb"],
+                  acc_pcn_d1=m["acc_pcn_d1"], acc_hebb_d1=m["acc_hebb_d1"],
+                  acc_pcn_min=ccfg.acc_pcn_min, acc_hebb_max=ccfg.acc_hebb_max,
+                  acc_gap_min=ccfg.acc_gap_min, distal_share_min=ccfg.distal_share_min,
+                  per_seed=[{k: p[k] for k in ("seed", "acc_pcn", "acc_hebb",
+                                               "acc_gap", "distal_pcn")} for p in per],
+                  seed_pass=ok)
+        c5_pass = all(all(v) for v in ok.values())
+        crit["credit_screen"] = dict(pass_=bool(c5_pass), **c5)
 
     crit["all_pass"] = all(v["pass_"] for k, v in crit.items() if k != "all_pass")
     return crit

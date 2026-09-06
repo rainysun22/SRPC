@@ -10,13 +10,14 @@ Phase-C（阶段 C，软件版内在化）：出生即结构稀疏（扇入受�
 全程 NumPy 局部规则、免反向传播（docs/SRPC_DESIGN.md）。
 """
 from .config import (AcceptanceBConfig, AcceptanceCConfig, AcceptanceConfig,
-                     ArcConfig, CLConfig, DeepConfig, FieldConfig,
+                     ArcConfig, CLConfig, CreditConfig, DeepConfig, FieldConfig,
                      MemoryConfig, ModelConfig, PhaseCConfig, SlotConfig,
                      Track1Config, Track2Config)
 from .env import SlotWorld, SourceFieldWorld
 from .model import SRPCModel, FlatPCModel, LookupModel
 from .runner import (run_field, run_slot, run_track1, run_track2,
                      evaluate_acceptance)
+from .credit import run_credit_screen
 from .memory import PrototypeMemory
 from .arc import ArcLite
 from .deepmodel import DeepSRPC
@@ -30,11 +31,13 @@ __version__ = "0.3.0"
 
 __all__ = [
     "ModelConfig", "FieldConfig", "SlotConfig", "Track1Config", "Track2Config",
-    "AcceptanceConfig", "DeepConfig", "MemoryConfig", "ArcConfig", "CLConfig",
+    "AcceptanceConfig", "CreditConfig", "DeepConfig", "MemoryConfig",
+    "ArcConfig", "CLConfig",
     "AcceptanceBConfig", "PhaseCConfig", "AcceptanceCConfig",
     "SourceFieldWorld", "SlotWorld",
     "SRPCModel", "FlatPCModel", "LookupModel",
     "run_field", "run_slot", "run_track1", "run_track2", "evaluate_acceptance",
+    "run_credit_screen",
     "PrototypeMemory", "ArcLite", "DeepSRPC",
     "EnergyLedger", "llm_task_macs",
     "eval_task", "eval_combination", "run_sequential", "forget_stats",

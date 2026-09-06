@@ -40,6 +40,17 @@ def _colnorm(w: np.ndarray) -> np.ndarray:
     return w / np.maximum(n, 1e-8)
 
 
+def _kwta(x: np.ndarray, frac: float) -> np.ndarray:
+    """k-WTA：保留 top-k 激活，其余置零（结构性稀疏激活，不变量 3）。"""
+    k = max(1, int(round(frac * x.size)))
+    if k >= x.size:
+        return x
+    idx = np.argpartition(x, -k)[-k:]
+    out = np.zeros_like(x)
+    out[idx] = x[idx]
+    return out
+
+
 class SRPCModel:
     """SR-PC 认知核心。self_loop=False 为自省环关闭的 A/B 对照：
     结构与参数量完全一致，仅停用自我预测器/精度调制/主动推理动作选择。"""
@@ -57,6 +68,10 @@ class SRPCModel:
         self.Ws2 = _colnorm(rng.uniform(0.5, 1.0, (cfg.n_l2, cfg.n_self)))
         nz = cfg.n_self + max(n_actions, 0)
         self.Wdyn = rng.normal(0.0, 0.05, (cfg.n_self, nz))
+        # 结构性稀疏掩码（不变量 3：出生即定型，学习只更新已有突触）
+        self.mask10 = self.mask21 = self.mask2s = self.mask_dyn = None
+        self.mask_sig: tuple = ()
+        self._born_sparse(cfg, rng)
 
         # 状态（非负稀疏）
         self.x1 = np.zeros(cfg.n_l1)
@@ -72,6 +87,45 @@ class SRPCModel:
         self.n_action = np.zeros(max(n_actions, 1), dtype=int)
 
     # ------------------------------------------------------------------
+    # 结构性稀疏（不变量 3：出生即定型掩码，学习只改已有突触）
+    # ------------------------------------------------------------------
+    def _born_sparse(self, cfg: ModelConfig, rng: np.random.Generator) -> None:
+        """层 1 连续感受野窗口（感知局部性，分块稀疏）+ 内部层/自省随机扇入。
+
+        fan_in_frac=0 为稠密旧路径；kwta_frac 在 observe 中生效。
+        """
+        if cfg.fan_in_frac > 0:
+            f = cfg.fan_in_frac
+            k1 = max(1, int(round(f * cfg.d_obs)))
+            m1 = np.zeros((cfg.d_obs, cfg.n_l1), dtype=bool)
+            for j in range(cfg.n_l1):
+                st = int(rng.integers(0, cfg.d_obs - k1 + 1))
+                m1[st:st + k1, j] = True
+            k2 = max(1, int(round(f * cfg.n_l1)))
+            m2 = np.zeros((cfg.n_l1, cfg.n_l2), dtype=bool)
+            for j in range(cfg.n_l2):
+                m2[rng.choice(cfg.n_l1, size=k2, replace=False), j] = True
+            ks = max(1, int(round(f * cfg.n_l2)))
+            ms = np.zeros((cfg.n_l2, cfg.n_self), dtype=bool)
+            for j in range(cfg.n_self):
+                ms[rng.choice(cfg.n_l2, size=ks, replace=False), j] = True
+            self.mask10, self.mask21, self.mask2s = m1, m2, ms
+            self.W10 = _colnorm(self.W10 * m1)
+            self.W21 = _colnorm(self.W21 * m2)
+            self.Ws2 = _colnorm(self.Ws2 * ms)
+        if cfg.fan_in_dyn_frac > 0:
+            kd = max(1, int(round(cfg.fan_in_dyn_frac * cfg.n_self)))
+            md = np.zeros(self.Wdyn.shape, dtype=bool)
+            for j in range(self.Wdyn.shape[1]):
+                md[rng.choice(cfg.n_self, size=kd, replace=False), j] = True
+            self.mask_dyn = md
+            self.Wdyn = self.Wdyn * md
+        self.mask_sig = tuple(
+            hash(m.tobytes()) for m in (self.mask10, self.mask21,
+                                        self.mask2s, self.mask_dyn)
+            if m is not None)
+
+    # ------------------------------------------------------------------
     # 一步在线处理：局部推断 -> 误差 -> 自省 -> 局部学习
     # ------------------------------------------------------------------
     def observe(self, s: np.ndarray) -> dict:
@@ -85,17 +139,23 @@ class SRPCModel:
             u1 = cfg.alpha * (x1_hat - self.x1) + cfg.beta * (self.W10.T @ e0)
             m1 = np.abs(u1) > cfg.theta_event
             self.x1 = np.clip(self.x1 + u1 * m1, 0.0, cfg.x_max)
+            if cfg.kwta_frac > 0:
+                self.x1 = _kwta(self.x1, cfg.kwta_frac)
 
             e1 = self.x1 - x1_hat
             x2_hat = self.Ws2 @ self.xs
             u2 = cfg.alpha * (x2_hat - self.x2) + cfg.beta * (self.W21.T @ e1)
             m2 = np.abs(u2) > cfg.theta_event
             self.x2 = np.clip(self.x2 + u2 * m2, 0.0, cfg.x_max)
+            if cfg.kwta_frac > 0:
+                self.x2 = _kwta(self.x2, cfg.kwta_frac)
 
             e2 = self.x2 - x2_hat
             us = cfg.alpha * (self.pred_self - self.xs) + cfg.beta * (self.Ws2.T @ e2)
             ms = np.abs(us) > cfg.theta_event
             self.xs = np.clip(self.xs + us * ms, 0.0, cfg.x_max)
+            if cfg.kwta_frac > 0:
+                self.xs = _kwta(self.xs, cfg.kwta_frac)
 
             ev1, ev2, evs = m1.mean(), m2.mean(), ms.mean()
 
@@ -129,6 +189,8 @@ class SRPCModel:
                 gate = self.last_z > cfg.theta_syn
                 self.Wdyn *= (1.0 - cfg.dyn_decay)
                 self.Wdyn += cfg.eta_dyn * np.outer(e_self, self.last_z * gate)
+                if self.mask_dyn is not None:
+                    self.Wdyn *= self.mask_dyn     # 结构由构造保证
 
         # ---------- 规则 2：局部 Hebbian 学习（活跃门控） ----------
         evw = 0.0
@@ -140,6 +202,12 @@ class SRPCModel:
             self.W21 += lr * np.outer(e1, self.x2 * g2)
             gs = self.xs > cfg.theta_syn
             self.Ws2 += lr * np.outer(e2, self.xs * gs)
+            if self.mask10 is not None:
+                self.W10 *= self.mask10          # 结构由构造保证：只更新已有突触
+            if self.mask21 is not None:
+                self.W21 *= self.mask21
+            if self.mask2s is not None:
+                self.Ws2 *= self.mask2s
             np.clip(self.W10, 0.0, None, out=self.W10)
             np.clip(self.W21, 0.0, None, out=self.W21)
             np.clip(self.Ws2, 0.0, None, out=self.Ws2)
