@@ -1,6 +1,6 @@
 # SR-PC（自省式预测编码）演化智能系统
 
-Self-Reflective Predictive Coding：从"最小化预测误差"这一条内置规则出发，通过与世界交互在线长出**形成 - 修正 - 组合**能力的演化智能系统原型。对应设计文档 [docs/SRPC_DESIGN.md](docs/SRPC_DESIGN.md)：
+Self-Reflective Predictive Coding：从"最小化预测误差"这一条内置规则出发，通过与世界交互在线长出**形成 - 修正 - 组合**能力的演化智能系统原型。对应设计文档 [docs/SRPC_DESIGN.md](docs/SRPC_DESIGN.md)（v1.4，大模型仅作能力评测基准、不进系统构造）：
 
 - **阶段 A（Phase-0 原型）**：原理自证 —— 形成、修正、组合的最小闭环
 - **阶段 B（规模化与组合）**：深层预测编码（DeepSRPC）、多时间尺度记忆（PrototypeMemory）、ARC-lite 组合基准、顺序学习免遗忘
@@ -36,7 +36,7 @@ scripts/
   run_phase0.py  # 阶段 A 入口：跑全部实验并生成验收报告
   run_phaseB.py  # 阶段 B 入口：顺序学习 + 组合泛化 + Pareto 回归验收
 docs/
-  SRPC_DESIGN.md  # 设计文档（7.5 / 8 节验收标准）
+  SRPC_DESIGN.md  # 设计文档 v1.4（§7.5 阶段 A 六项验收 / §8 里程碑）
 results/          # 阶段 A：自动生成的图表 / metrics.json / report.md
 results_phaseB/   # 阶段 B：同上
 ```
@@ -53,7 +53,9 @@ python scripts/run_phaseB.py --steps 200  # 冒烟测试
 
 运行后自动生成 `results/report.md`、`results_phaseB/report.md`（验收报告）与图表。
 
-## 验收结果（设计文档 7.5，3 seeds 均值）
+## 验收结果（阶段 A，3 seeds 均值）
+
+> 按原四条件验收（对应 v1.4 §7.5 第 1/3/4/5 项）；v1.4 新增的**信用分配早筛（§2.4/§8.5，承重墙）**待实现，**免遗忘早验（第 6 项）**已由阶段 B 顺序学习实验覆盖（见下）。
 
 | 条件 | 结果 | 关键证据 |
 |---|---|---|
@@ -64,7 +66,9 @@ python scripts/run_phaseB.py --steps 200  # 冒烟测试
 
 补充：零样本组合泛化 SR-PC 保留组合误差 0.025 vs 查表基线 1.099；事件驱动更新率 0.37 → 0.07。
 
-## 验收结果（设计文档 8 节阶段 B，3 seeds，每个 seed 都必须通过）
+## 验收结果（阶段 B，3 seeds，每个 seed 都必须通过）
+
+> 对照 v1.4 §8 阶段 B 关键验收（能力上升 + 免遗忘 + 预算不缺 + 符号保真）：前两项及组合零样本已过；ARC 一热编码即 §7.7 正交基底符号接地，**符号保真自测与迭代/稀疏预算记账**为待办。
 
 | 里程碑 | 结果 | 关键证据 |
 |---|---|---|
