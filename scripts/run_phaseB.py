@@ -149,6 +149,13 @@ def main():
     with open(out / "report.md", "w", encoding="utf-8") as f:
         f.write(build_report(mem_runs, no_runs, combo, acc, figs, elapsed,
                              regression))
+    # B 收尾 W1 节（人工整理的架构债务记录，含冻结证据）——存在则附加，重跑不丢失
+    w1 = out / "report_w1.md"
+    if w1.exists():
+        with open(w1, encoding="utf-8") as fsrc:
+            w1_txt = fsrc.read()
+        with open(out / "report.md", "a", encoding="utf-8") as fdst:
+            fdst.write("\n" + w1_txt)
 
     print("\n===== 阶段 B 验收结论 =====")
     for k, v in acc.items():
