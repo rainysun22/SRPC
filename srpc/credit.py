@@ -1,7 +1,7 @@
 """信用分配早筛（承重墙）—— docs/SRPC_DESIGN.md §2.4 / §7.5-2 / §8.5。
 
 **任务（长程依赖小任务）**：延迟 XOR。
-- 每步 d_feat 维特征，前两维为双峰 bit（0.2/0.8），其余为满幅随机干扰；
+- 每步 d_feat 维特征，前两维为双峰 bit（0/1 二值，v2 方差修复），其余为满幅随机干扰；
 - 目标 `y_t = XOR(bit0(x_{t-Δ}), bit1(x_{t-Δ}))`：只与 Δ 步之前的输入有关，
   且与任何单一输入特征**零边际相关**（纯相关性联想必然失败，§2.4）；
 - 输入 = 最近 Δ+1 步窗口拼接（延迟线属机械外围序列化，§2.2），
@@ -116,9 +116,13 @@ class CreditPCN:
         self.x1 = np.zeros(cfg.h1)
         self.x2 = np.zeros(cfg.h2)
         self.learning = True
-        self.orth = True   # 侧抑制（7.3 规则 2）：类原型列去相关
-        self.eta_inf = 1.0   # 推断阻尼：梯度步长（谱半径大时需 <1 保证收敛）
+        # 侧抑制（7.3 规则 2 横向竞争）：W3 类原型列出生即正交（_orth_cols），
+        # 结构由构造保证（不变量 3）；训练期不重复正交化 —— 重复 Gram-Schmidt
+        # 会抹平列信号幅度、拉低 err 臂准确率（dbg5/verify_final：orth=True 掉到 0.75-0.77）。
+        self.orth = False
+        self.eta_inf = cfg.eta_inf   # 推断阻尼步长（谱半径 ~8 下的收敛步长）
         self.iters = cfg.settle_iters
+        self.hebb_free = cfg.hebb_free  # hebb 臂训练用自由推断（无 yoh 钳制，消除类泄漏）
 
     # ------------------------------------------------------------------
     # 规则 1：局部推断（自由能梯度下降；事件门控 + k-WTA，不变量 3）
@@ -193,13 +197,13 @@ class CreditPCN:
         self.W3 = _colnorm(self.W3)
 
     # ------------------------------------------------------------------
-    # 一步训练：reset -> 收敛（钳制 yoh）-> 学习
+    # 一步训练：reset -> 收敛（err 臂钳制 yoh；hebb 臂自由推断防类泄漏）-> 学习
     # ------------------------------------------------------------------
     def train_step(self, x0: np.ndarray, y: float) -> float:
         yoh = np.array([1.0, 0.0]) if y == 0 else np.array([0.0, 1.0])
         self.x1[:] = 0.0
         self.x2[:] = 0.0
-        self._infer(x0, yoh, free_out=False)
+        self._infer(x0, yoh, free_out=self.mode == "hebb" and self.hebb_free)
         self._learn(x0, yoh)
         return float(np.linalg.norm(self._e0))
 
@@ -230,7 +234,7 @@ def _make_sequence(cfg: CreditConfig, rng: np.random.Generator,
                    n: int, delay: int) -> tuple[np.ndarray, np.ndarray]:
     """生成 (窗口 X, 目标 y)。
 
-    每步 d_feat 维：前两维为双峰 bit（0.2/0.8），其余维满幅随机干扰；
+    每步 d_feat 维：前两维为双峰 bit（cfg.bit_lo/cfg.bit_hi），其余维满幅随机干扰；
     目标 y_t = XOR(bit0(x_{t-delay}), bit1(x_{t-delay}))；
     窗口 = 最近 delay+1 步拼接（远端块在最前）。
     """
@@ -239,8 +243,8 @@ def _make_sequence(cfg: CreditConfig, rng: np.random.Generator,
     feat = rng.uniform(0.0, 1.0, (steps, d))
     b0 = rng.random(steps) < 0.5
     b1 = rng.random(steps) < 0.5
-    feat[:, 0] = np.where(b0, 0.8, 0.2)
-    feat[:, 1] = np.where(b1, 0.8, 0.2)
+    feat[:, 0] = np.where(b0, cfg.bit_hi, cfg.bit_lo)
+    feat[:, 1] = np.where(b1, cfg.bit_hi, cfg.bit_lo)
     y = (b0[:-delay] != b1[:-delay]) if delay > 0 else (b0 != b1)
     X = np.empty((n, (delay + 1) * d))
     for t in range(n):
@@ -259,6 +263,9 @@ def _run_seed(cfg: CreditConfig, seed: int, delay: int,
     out = {}
     for mode in ("error", "hebb"):
         m = CreditPCN(rcfg, np.random.default_rng(seed * 3000 + 11), mode)
+        if mode == "hebb":
+            # hebb 臂浅迭代：纯相关是瞬时联想、无需深迭代（深迭代反抬基线）
+            m.iters = rcfg.hebb_settle_iters
         for t in range(train_steps):
             m.train_step(Xtr[t], float(ytr[t]))
         m.set_learning(False)

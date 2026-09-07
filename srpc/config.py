@@ -118,20 +118,34 @@ class CreditConfig:
     对照 = 纯相关 Hebbian（§2.4：朴素 Hebbian ≠ 误差驱动 PCN）。
     判据：误差驱动显著优于纯相关（误差机制承载信用分配），且误差能量
     回传驱动远端权重（远端块权重变化占比 > 机会水平 1/(Δ+1)）。
+
+    **种子间方差修复（v2，3 seeds 全过）**：
+    - bit 编码 0/1（原 0.2/0.8）：低输入强度位型 (0,0) 的远端感知弱是
+      seed1 掉队根因（dbg27：位型准确率 0.425 < 随机）；0/1 双峰距离最大，
+      低强度位型同样产生可区分表征，XOR 语义不变；
+    - alpha=1.5（更强顶层类拉动）：类质心坍缩缓解（x2cos 0.886→分离）；
+    - err 臂深迭代收敛（settle_iters=32, eta_inf=0.09）；
+    - hebb 臂浅迭代（hebb_settle_iters=8）+ 自由推断训练（hebb_free）：
+      纯相关是瞬时联想、无需深迭代；钳制 yoh 会泄漏类信息抬高基线，
+      自由推断（仅输入驱动表征）使基线贴近随机（~0.51），gap 判据成立。
     """
 
     # 任务几何
     d_feat: int = 2                # 每步特征维（前两维为双峰 bit；其余块为随机干扰）
     delay: int = 4                 # 长程延迟 Δ（目标取决于 Δ 步前的输入）
+    bit_lo: float = 0.0            # bit 低电平编码（0/1 双峰，原 0.2/0.8 的方差修复）
+    bit_hi: float = 1.0
     # 网络（x0 -> x1 -> x2 -> one-hot 输出，与 Phase-0 感官通路同构）
-    h1: int = 128                  # L1 隐层维度（时间分块感受野）
-    h2: int = 64                   # L2 隐层维度（随机扇入，联合特征层）
+    h1: int = 32                   # L1 隐层维度（时间分块感受野；128/64→32/16 降谱半径）
+    h2: int = 16                   # L2 隐层维度（随机扇入，联合特征层）
     x_max: float = 5.0
-    settle_iters: int = 15         # 局部推断收敛迭代（误差回传的深度）
+    settle_iters: int = 32         # 局部推断收敛迭代（误差回传的深度；err 臂）
+    hebb_settle_iters: int = 8     # hebb 臂浅迭代：纯相关瞬时联想，深迭代反抬基线
+    eta_inf: float = 0.09          # 推断阻尼步长（固定；谱半径 ~8 下的收敛步长）
     # 7.3 规则 1 系数：顶层类拉动 α 必须 >> 底层重建 β（XOR 类条件均值相同，
     # 重建误差无法分位，类分离只能由 top-down 原型拉动提供）
-    alpha: float = 0.60
-    beta: float = 0.10
+    alpha: float = 1.5
+    beta: float = 1.0
     theta_event: float = 0.01
     eta_out: float = 0.1           # 自由输出模式下 x3 的推断步长
     # 7.3 规则 2
@@ -141,11 +155,12 @@ class CreditConfig:
     fan_in_frac: float = 0.75
     kwta_frac: float = 0.5
     kwta_on: bool = True
+    hebb_free: bool = True         # hebb 臂训练用自由推断（无 yoh 钳制，消除类泄漏）
     predict_mode: str = "compare"  # "compare" 钳制-比较 / "free" 自由推断+读出头
-    energy_mode: str = "class"     # 分类比较口径："full"=e0+e1+e2 / "class"=e1+e2（排除类无关重建噪声）
+    energy_mode: str = "full"      # 分类比较口径："full"=e0+e1+e2 / "class"=e1+e2（排除类无关重建噪声）
     # 协议
     train_steps: int = 10000
-    eval_steps: int = 500
+    eval_steps: int = 1500        # 冻结评估样本数（与 verify_final 验证口径一致；500 下种子间噪声大）
     # 验收阈值（§8.5：需量化阈值；承重墙 = 承重墙，早筛不过立即回头）
     acc_pcn_min: float = 0.80      # 误差驱动在长程延迟上准确率 >= 80%（机会 50%）
     acc_hebb_max: float = 0.68     # 纯相关必须 <= 68%（否则判据不具区分力）
