@@ -1,9 +1,9 @@
 # SR-PC（自省式预测编码）演化智能系统
 
-Self-Reflective Predictive Coding：从"最小化预测误差"这一条内置规则出发，通过与世界交互在线长出**形成 - 修正 - 组合**能力的演化智能系统原型。对应设计文档 [docs/SRPC_DESIGN.md](docs/SRPC_DESIGN.md)（v1.5，大模型仅作能力评测基准、不进系统构造），后续路线（E0 / D / E / F / G）见 [docs/ROADMAP.md](docs/ROADMAP.md)：
+Self-Reflective Predictive Coding：从"最小化预测误差"这一条内置规则出发，通过与世界交互在线长出**形成 - 修正 - 组合**能力的演化智能系统原型。对应设计文档 [docs/SRPC_DESIGN.md](docs/SRPC_DESIGN.md)（v1.7，大模型仅作能力评测基准、不进系统构造），后续路线（E / F / G / D）见 [docs/ROADMAP.md](docs/ROADMAP.md)：
 
 - **阶段 A（Phase-0 原型）**：原理自证 —— 形成、修正、组合的最小闭环 + 信用分配早筛（承重墙）
-- **阶段 B（规模化与组合）**：深层预测编码（DeepSRPC）、多时间尺度记忆（PrototypeMemory）、ARC-lite 组合基准、顺序学习免遗忘 —— 主验收 3/4 过（learn / forget / combo），**记忆增益 FAIL**（架构债务 #1：记忆先验无法下传至读出源，排入 E0）；B 收尾 W1（符号保真自测 + 预算记账）已按在线阈值（v2）完成，8/8 过，遗留债务与证据见 [results_phaseB/report_w1.md](results_phaseB/report_w1.md)
+- **阶段 B（规模化与组合）**：深层预测编码（DeepSRPC）、多时间尺度记忆（PrototypeMemory）、ARC-lite 组合基准、顺序学习免遗忘 —— 主验收 3/4 过（learn / forget / combo）；**记忆增益项经 E0 收口重定性为原理性不可达**（ARC-lite 为 i.i.d. 映射，记忆先验无增量信息——b1 零距离耦合/单头遗忘压力消融均证 ≈0%；非架构债务，"能力=记忆·拼合"验证迁移 E3 语言流 / F3 ICL）；B 收尾 W1（符号保真自测 + 预算记账）8/8 过。证据见 [results_phaseB/report_w1.md](results_phaseB/report_w1.md) / [results_phaseB/report_e0.md](results_phaseB/report_e0.md)
 - **阶段 C（内在低功耗，软件版）**：出生即结构稀疏（分块/扇入受限 + k-WTA）+ 三口径 MAC 记账 + 大模型能效标尺 + int8 部署就绪 —— 低功耗是架构本身的属性，非训练后裁剪；**已锁定**，硬件化 deferred 至有专用硬件
 
 ## 核心特性
@@ -45,7 +45,9 @@ scripts/
   run_phaseB.py  # 阶段 B 入口：顺序学习 + 组合泛化 + Pareto 回归验收
   run_phaseC.py  # 阶段 C 入口：结构稀疏核心双臂 + 能耗/结构/量化验收
 docs/
-  SRPC_DESIGN.md  # 设计文档 v1.5（§7.5 阶段 A 六项验收 / §8.5 信用分配早筛 / §8 里程碑 / §9 开放问题）
+  SRPC_DESIGN.md  # 设计文档 v1.7（§7.5 阶段 A 六项验收 / §8.5 信用分配早筛 / §8 里程碑 / §9 开放问题）
+  ROADMAP.md      # 后续路线图（E 语言化 / F 知识+持续学习 / G 推理规划 / D 意识向）
+  GPU_TASKS.md    # GPU 依赖任务清单（沙箱外执行）
 results/          # 阶段 A：自动生成的图表 / metrics.json / report.md
 results_phaseB/   # 阶段 B：同上
 results_phaseC/   # 阶段 C：同上
@@ -83,14 +85,14 @@ python scripts/run_phaseC.py --steps 200  # 冒烟测试
 
 ## 验收结果（阶段 B，3 seeds，每个 seed 都必须通过）
 
-> 对照 v1.5 §8 阶段 B 关键验收（能力上升 + 免遗忘 + 预算不缺 + 符号保真）。B 收尾 W1 已完成：**符号保真自测**按在线可达阈值（v2，附 LS 上限对比）8/8 过；**迭代/稀疏预算记账**过（B1 口径修正为"≤3 迭代有效，>3 迭代退化"，退化记架构债务 #2）。遗留债务（记忆增益 FAIL、深迭代退化、在线 RLS 距 LS 差 2.6pp）与全部证据见 [results_phaseB/report_w1.md](results_phaseB/report_w1.md)，修复排入 E0。
+> 对照 v1.7 §8 阶段 B 关键验收（能力上升 + 免遗忘 + 预算不缺 + 符号保真）。B 收尾 W1 已完成：**符号保真自测**按在线可达阈值（v2，附 LS 上限对比）8/8 过；**迭代/稀疏预算记账**过（B1 口径修正为"≤3 迭代有效，>3 迭代退化"，退化记债务 #2、降优先级）。记忆增益项经 **E0 收口**（五配置矩阵 + 单头消融）重定性为原理性不可达、验证迁移 E3/F3；遗留债务（深迭代退化、在线 RLS 距 LS 差 2.6pp）与全部证据见 [results_phaseB/report_w1.md](results_phaseB/report_w1.md) / [results_phaseB/report_e0.md](results_phaseB/report_e0.md)。
 > 结构稀疏（不变量 3：出生即掩码 + k-WTA）已内嵌为 A/B 默认数学形式，下列数字即稀疏核心的结果。
 
 | 里程碑 | 结果 | 关键证据 |
 |---|---|---|
 | 1 能力随交互上升 | PASS | 4 个变换任务任务内误差斜率全部 < 0（均值 −5.2e−2 / −4.9e−2 / −4.9e−2 / −4.9e−2） |
 | 2 免遗忘（带记忆） | PASS | 顺序学习后旧任务误差相对回升均值 5.5%（阈值 ≤25%），max 48%（观察项，见 report_w1 §4） |
-| 3 记忆增益 | **FAIL** | 带记忆保留误差 2.4% vs 无记忆 2.4%（改善 0%，阈值 ≥10%）—— 架构债务 #1：记忆先验只拉顶层 x4、读出源在底层 ŝ=W1@x1，中间迭代动力学不下传（mem/no_mem 读出头权重逐元素相同），排入 E0 |
+| 3 记忆增益 | **原理性不可达（E0 收口）** | 带记忆保留误差 2.4% vs 无记忆 2.4%。E0 五配置矩阵 + 单头消融判定：b1（读出源=x_L，零传播距离）增益 −0.25%、单头（遗忘压力最大化）× b1 增益 −1.9%、a/ab（x1 级记忆）−126% 且 S1/S2 回退——ARC-lite retain 为 i.i.d. 确定映射，I(s_out; 记忆原型 \| x_L) ≈ 0，任何耦合设计均不可达；非架构债务，记忆价值验证迁移 E3（语言流）/F3（ICL），见 [results_phaseB/report_e0.md](results_phaseB/report_e0.md) |
 | 4 组合零样本 | PASS | 保留组合顺序复合 0.0261 vs 随机条件基线 0.0355（增益 26%，阈值 ≥20%） |
 | Pareto 回归 | PASS | Phase-0 快速回归（7.5 四项）全过，阶段 A 指标未退化 |
 | W1 符号保真自测（阈值 v2） | PASS | S1 逐格一致率 min 0.927~0.953（≥0.92；LS 上限 0.987）；S2 位置/颜色区分 max 0.630/0.962（≤0.70/0.97）；输入多样性 1.000（≥0.90）；网格级一致率与块结构守恒为记录项（LS 上限 0.555 < 原阈值 0.90，不可达故不设门） |

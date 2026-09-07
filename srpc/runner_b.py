@@ -76,12 +76,19 @@ def eval_combination(model: DeepSRPC, arc: ArcLite,
 # ----------------------------------------------------------------------
 def run_sequential(seed: int, with_memory: bool,
                    dcfg: DeepConfig, mcfg: MemoryConfig,
-                   acfg: ArcConfig, clcfg: CLConfig) -> dict:
-    """按任务序列顺序训练 4 个变换，返回 backward-transfer 矩阵与能力曲线。"""
+                   acfg: ArcConfig, clcfg: CLConfig,
+                   model_hook=None) -> dict:
+    """按任务序列顺序训练 4 个变换，返回 backward-transfer 矩阵与能力曲线。
+
+    model_hook(model)：构造后挂载实验性结构（E0-a 的 extra_mems 等），
+    默认 None = 主线行为不变。
+    """
     rng = np.random.default_rng(seed * 3000 + 1)
     rng_arc = np.random.default_rng(seed * 3000 + 2)
     mem = PrototypeMemory(mcfg, rng) if with_memory else None
     model = DeepSRPC(dcfg, 0, rng, self_loop=True, memory=mem)
+    if model_hook is not None:
+        model_hook(model)
     arc = ArcLite(acfg, rng_arc)
 
     n_tasks = arc.n_train

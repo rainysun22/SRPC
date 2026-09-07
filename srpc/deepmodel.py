@@ -70,6 +70,11 @@ class DeepSRPC:
         self.self_loop = self_loop
         self.learning = True
         self.memory = memory
+        # E0-a：层挂载式附加记忆 {层号: PrototypeMemory}（默认空 = 行为零变化）。
+        # 顶层记忆只拉 x_L、读出源在底层 -> 中间迭代动力学不下传（B 收尾债务 #1）；
+        # 把记忆下移至读出源邻近层（如 x2），先验经 1 层即可抵达读出路径。
+        # 与海马-皮层多层投射同构（内嗅皮层/浅层皮层均受海马回投射）。
+        self.extra_mems: dict[int, PrototypeMemory] = {}
         rng = rng or np.random.default_rng(0)
         self.rng = rng
 
@@ -168,16 +173,31 @@ class DeepSRPC:
         self.ledger.add(f"act_{l}", n)
 
     def _ro_src(self) -> np.ndarray:
-        """读出源表征：ro_on_recon=True 时为核心重建 ŝ=W1@x1（符号空间，变换=精确线性映射，
-        读出头逼近置换矩阵，可近精确表示翻转/旋转/重着色）；False 时为原始 x1（旧路径）。
+        """读出源表征（cfg.ro_recon_mode，E0 矩阵）：
+        recon = 核心重建 ŝ=W1@x1（符号空间，变换=精确线性映射，读出头逼近置换矩阵）；
+        self  = 顶层 x_L（记忆/条件先验直接拉动层，耦合零传播延迟）；
+        dual  = concat[ŝ, x_L]（保真走 ŝ、记忆耦合走 x_L）；
+        x1    = 原始 x1（旧对照路径）。
         """
-        if self.cfg.ro_on_recon:
+        m = self.cfg.ro_recon_mode
+        if m == "recon":
             return self.Ws[1] @ self.xs[1]
+        if m == "self":
+            return self.xs[self.L]
+        if m == "dual":
+            return np.concatenate([self.Ws[1] @ self.xs[1], self.xs[self.L]])
         return self.xs[self.ro_src]
 
     def _ro_dsrc(self) -> int:
-        """读出源维数：重建 = 符号维 dims[0]；原始 = x1 维 dims[ro_src]。"""
-        return self.dims[0] if self.cfg.ro_on_recon else self.dims[self.ro_src]
+        """读出源维数：recon=dims[0]；self=dims[L]；dual=dims[0]+dims[L]；x1=dims[ro_src]。"""
+        m = self.cfg.ro_recon_mode
+        if m == "recon":
+            return self.dims[0]
+        if m == "self":
+            return self.dims[self.L]
+        if m == "dual":
+            return self.dims[0] + self.dims[self.L]
+        return self.dims[self.ro_src]
 
     def _ro_macs(self, idx: int, n_heads: float = 1.0) -> None:
         """读出头记账（ŝ = W_out @ src；src = 重建 ŝ 或 x1）。"""
@@ -262,6 +282,10 @@ class DeepSRPC:
                         m_ = float(self.memory.last_macs)
                         self._mac3("mem", m_, m_, m_)
                     u = u + cfg.gamma_mem * (proto - self.xs[l])
+            elif l in self.extra_mems:
+                # E0-a：中间层附加记忆先验（拉动下移，绕开深层传播延迟）
+                proto = self.extra_mems[l].recall(self.xs[l], self.group())
+                u = u + cfg.gamma_mem * (proto - self.xs[l])
             u = u * cfg.eta_inf   # 推断步长（阻尼，防 W1^TW1 大特征值振荡）
             m = np.abs(u) > cfg.theta_event
             self.xs[l] = np.clip(self.xs[l] + u * m, 0.0, cfg.x_max)
@@ -334,13 +358,17 @@ class DeepSRPC:
                     self._mac3("learn_dyn", float(gate.sum()) * self.dynfan,
                                float(self.dyn_nz) * self.dynfan,
                                float(self.d_self * self.dyn_nz))
-            if self.memory is not None:
+            if self.memory is not None or self.extra_mems:
                 # 置信 = 读出误差的负指数（任务执行得好 -> 信念可信 -> 巩固进记忆）
                 stable = float(np.exp(-self.last_e_out / max(self.d_out, 1.0) ** 0.5))
-                self.memory.consolidate(self.xs[self.L], stable, self.group())
-                if self.trace:
-                    m_ = float(self.memory.last_macs)
-                    self._mac3("mem", m_, m_, m_)
+                if self.memory is not None:
+                    self.memory.consolidate(self.xs[self.L], stable, self.group())
+                    if self.trace:
+                        m_ = float(self.memory.last_macs)
+                        self._mac3("mem", m_, m_, m_)
+                # E0-a：中间层附加记忆同步巩固（同一置信、同组免遗忘结构）
+                for l_, mem_ in self.extra_mems.items():
+                    mem_.consolidate(self.xs[l_], stable, self.group())
         return boost, float(np.linalg.norm(e_self))
 
     # ------------------------------------------------------------------
@@ -379,10 +407,11 @@ class DeepSRPC:
     def readout(self) -> np.ndarray:
         """ŝ = Σ_i cond_i * (W_out_i @ src)（条件门控读出）。
 
-        src = 核心重建 ŝ=W1@x1（符号空间，翻转/旋转/重着色为精确线性映射，读出头
-        逼近置换矩阵 -> 符号保真上限由重建质量决定，W1 实证 LS 可达 0.99）；
-        ro_on_recon=False 时为原始 x1（旧路径，随机扇入掩码与置换结构冲突，上限 0.74）。
-        顶层 x_self 保留为自省/条件/记忆承载层（不变量 4），不承载读出。
+        src = 读出源（cfg.ro_recon_mode，见 _ro_src）。默认 recon = 核心重建
+        ŝ=W1@x1（符号空间，翻转/旋转/重着色为精确线性映射，读出头逼近置换矩阵 ->
+        符号保真上限由重建质量决定，W1 实证 LS 可达 0.99）。x1 旧路径（随机扇入
+        掩码与置换结构冲突，上限 0.74）。E0：self/dual 为记忆-读出耦合实验模式。
+        顶层 x_self 保留为自省/条件/记忆承载层（不变量 4）。
         """
         idx = self.head_idx()
         if idx is not None and idx < len(self.W_outs) and self.W_outs[idx] is not None:
@@ -403,9 +432,10 @@ class DeepSRPC:
     def learn_readout(self, s_out: np.ndarray) -> tuple[float, np.ndarray]:
         """读出学习：只更新当前条件对应的头（ΔW_out_i = lr * e ⊗ src，局部外积，免反传）。
 
-        src = 核心重建 ŝ（符号空间）或 x1；训练任务 i 只更新头 i ->
-        变换片段知识结构上免遗忘（阶段 B 里程碑）。重建源头为稠密（随机扇入掩码
-        与置换结构冲突，W1 实证 LS+掩码 0.74 vs 稠密 0.99），MAC 以事件驱动记账。
+        src = 读出源（cfg.ro_recon_mode）。训练任务 i 只更新头 i ->
+        变换片段知识结构上免遗忘（阶段 B 里程碑）。recon/self/dual 源头为稠密零初始化
+        （噪声列不参与 -> 不干扰置换 argmax；随机扇入掩码与置换结构冲突，
+        W1 实证 LS+掩码 0.74 vs 稠密 0.99），MAC 以事件驱动记账。
         """
         cfg = self.cfg
         src = self._ro_src()
@@ -420,9 +450,9 @@ class DeepSRPC:
                 self.ro_sig.append(None)
                 self.ro_Ps.append(None)
             if self.W_outs[idx] is None:
-                if cfg.ro_on_recon:
-                    # 重建源：零初始化（噪声列不参与 -> 不干扰置换 argmax）+ 稠密
-                    # （随机扇入掩码与置换结构冲突，W1 实证 LS+掩码 0.74 vs 稠密 0.99）。
+                if cfg.ro_recon_mode in ("recon", "self", "dual"):
+                    # recon/self/dual 源：零初始化（噪声列不参与 -> 不干扰置换 argmax）
+                    # + 稠密（随机扇入掩码与置换结构冲突，W1 实证 LS+掩码 0.74 vs 稠密 0.99）。
                     self.W_outs[idx] = np.zeros((len(s_out), self._ro_dsrc()))
                 else:
                     W = self.rng.uniform(0.0, 0.5, (len(s_out), self._ro_dsrc()))
