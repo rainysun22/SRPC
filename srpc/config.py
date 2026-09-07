@@ -343,6 +343,107 @@ class AcceptanceCConfig:
 
 
 # ----------------------------------------------------------------------
+# 阶段 E2（规模化语言训练）：µPC 适配 + 1/2/4M 梯子 + BP 孪生对照
+# 对应 docs/ROADMAP.md 阶段 E2 / docs/SRPC_DESIGN.md §9-2
+# ----------------------------------------------------------------------
+
+@dataclass
+class E2Config:
+    """E2 规模化语言训练配置（字节级 next-byte 预测，BPC 主指标）。
+
+    **任务**：真实语料（tinyshakespeare，1115394 字节，65 个有效字节值）
+    的 next-byte 预测。窗口 = 最近 W 步字节一热（256 维正交基底，E1 前端
+    直接复用），目标 = 下一字节。顺序流式单样本在线协议（逐样本增量更新，
+    无 batch / 无回放 / 无 shuffle，与阶段 A/B 同协议）。
+    训练/验证按位置顺序切分（前 90% / 后 10%，LM 标准口径）。
+
+    **网络（LMPCN，LangPCN 的 LM 化）**：
+        x0(W×256 一热) -> x1(h, 时间块感受野+随机扇入) -> x2(h, 随机扇入)
+        -> x3(256 类 logits)
+    训练钳制 x3=目标 one-hot（误差驱动局部规则，同 7.3）；评估自由推断，
+    读收敛态 x3（= min ½||x2−W3·x3||² 的 LS 解，近正交列下≈线性读出），
+    softmax(x3/τ) 计 BPC——τ 为读出温度标量（锚点模型校准切片上定，
+    随超参一并迁移验证）。
+
+    **µPC 适配（Innocenti et al. 2025, arXiv:2505.13124 的宽度规则锚定化）**：
+    µPC 原文：层前乘子进能量（输入 N0^-1/2、隐藏 (NL)^-1/2、输出 N^-1）
+    + 权重/活动学习率跨宽度零成本迁移。SR-PC 网络非标准（列归一/k-WTA/
+    结构掩码/生成方向），按各信号路径 O(1) 稳定性推导宽度指数，**锚定
+    h_ref=768（1M 档）**：锚点处全部超参 = E1 谱系值，宽度偏离仅由显式
+    前乘子/步长缩放补偿，迁移有效性由 4M 重调对照实验裁决：
+    - s1 = (h_ref/h)^{1/2}：W1 能量前乘子——前向 ŝ0=s1·W1·x1 的活跃
+      突触数 ∝ kwta·h，s1 保持 e0 幅度 O(1)（=> η1 不随宽度变）；
+    - et1 = eta_inf·(h/h_ref)^{1/2}：x1 活动步长补偿 s1 的识别方向衰减
+      （µPC"活动学习率"对应物）；
+    - η2 = η3 = eta_w·(h_ref/h)^{1/2}：e1/e2 范数 ∝ √h（列归一下
+      ||Δcol|| ∝ η·||e||），保持每样本列旋转角度 O(1)（µP 输出层
+      lr 缩放的同族修正）；η1 恒定（||e0|| 由 s1 稳住）；
+    - s2 = s3 = 1：W2 双向（√(h2/h1)·√kwta 与 √kwta）、W3 识别方向
+      （√kwta）在 h1=h2 下自然 O(1)。
+
+    **梯子**：宽度 h ∈ {768, 1200, 1856}（h1=h2，16 整除保证锚点均衡），
+    结构参数 ≈ {0.98M, 1.9M, 3.9M}；W=16 与 d0=4096 固定（隔离宽度轴，
+    µP/µPC 迁移的标准设定）。8M/15M 登顶 = GPU_TASKS T1。
+
+    **孪生对照（TwinMLP）**：参数量匹配（= PCN 结构参数）的稠密 2 隐层
+    MLP + ReLU + softmax CE + Adam（batch 32，同样本流）——标准反传
+    参照，不属 SR-PC 构造（GPU_TASKS 契约第 2 条）。
+
+    **iPC 增量调度（Salvatori et al. ICLR 2024 的上下文课程化）**：
+    远端上下文块掩码 4→8→16 三段展开（同一网络，逐步见到更长有效
+    上下文），1M 档消融验证是否采纳。
+
+    验收（预注册，ROADMAP E2）：
+    1. 单调性：BPC(4M) < BPC(2M) < BPC(1M)；
+    2. 斜率平行：PCN 每倍增增益 >= 0.5×孪生每倍增增益（且 > 0）；
+    3. 4M 档 BPC <= 1.5×孪生 4M 档 BPC；
+    4. µPC 迁移：4M 重调相对迁移超参的增益 <= 0.03 BPC。
+    沙箱预算为 pilot 口径（150k 步 ≈ 13% epoch），最终判定以全额预算
+    + GPU 登顶跑为准。
+    """
+
+    # 语料与协议
+    corpus_path: str = "data/tinyshakespeare.txt"
+    val_frac: float = 0.10
+    context: int = 16                  # W：上下文字节块数（d0 = 16×256 = 4096）
+    seed: int = 0
+    # 网络几何
+    ladder_widths: tuple = (768, 1200, 1856)   # h1=h2（16 整除，锚点均衡）
+    h_ref: int = 768                   # µPC 适配锚定宽度（= 1M 档）
+    rf_blocks: int = 2                 # L1 单元感受野 = 相邻 rf_blocks 个时间块
+    fan_in_frac: float = 0.75          # W2/W3 随机扇入占比（不变量 3）
+    kwta_frac: float = 0.5
+    x_max: float = 5.0
+    # 推断（锚点值，E1 谱系）
+    settle_iters: int = 12             # 锚点网格 {6,12} 裁定
+    eta_inf: float = 0.09
+    alpha: float = 1.5
+    beta: float = 1.0
+    theta_event: float = 0.01
+    eta_out: float = 0.1
+    # 学习（锚点值）
+    eta_w: float = 0.05                # 锚点网格 {0.02,0.05} 裁定
+    theta_syn: float = 1e-2
+    # 运行预算（pilot）
+    anchor_steps: int = 20000          # 锚点网格每配置步数
+    ladder_steps: int = 150000         # 梯子每档步数（≈13% epoch）
+    control_steps: int = 20000         # 4M 重调对照每配置步数
+    ipc_steps: int = 120000            # iPC 消融步数
+    eval_every: int = 10000
+    eval_windows: int = 800
+    eval_stride: int = 70              # 验证窗口间隔（覆盖验证段全程）
+    tau_grid: tuple = (0.15, 0.25, 0.4, 0.6, 0.9, 1.3)  # 读出温度网格
+    tau_cal_windows: int = 300         # τ 校准切片（验证段前 300 窗口）
+    # 孪生
+    twin_batch: int = 32
+    twin_lr: float = 1e-3
+    # 验收阈值（预注册）
+    slope_frac_min: float = 0.5        # 判据 2
+    twin_ratio_max: float = 1.5        # 判据 3
+    transfer_gain_max: float = 0.03    # 判据 4
+
+
+# ----------------------------------------------------------------------
 # 阶段 E1（语言化起步）：字节级 UTF-8 词元前端 + 语言长程信用分配小任务
 # 对应 docs/ROADMAP.md 阶段 E1 / docs/SRPC_DESIGN.md §9-2（自建词元前端）
 # ----------------------------------------------------------------------
