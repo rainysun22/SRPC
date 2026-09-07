@@ -105,10 +105,12 @@ class DeepSRPC:
         # 掩码签名（阶段 C 验收：结构自出生不变，学习只改已有突触）
         self.mask_sig: list = [None if m is None else hash(m.tobytes())
                                for m in self.masks]
-        # 条件门控读出头（ARC：每个变换任务一个头，ŝ = Σ_i cond_i * W_out_i @ x_self）。
+        # 条件门控读出头（ARC：每个变换任务一个头，ŝ = Σ_i cond_i * W_out_i @ x_{ro_src}）。
         # 训练任务 i 只更新头 i -> 变换片段知识结构上免遗忘（不变量 2：能力=记忆·拼合）；
         # 组合零样本 = 顺序复用已学头（先头 t1 后头 t2），随机条件 = 多头加权混合（无信息基线）。
-        self.W_outs: list[np.ndarray | None] = []   # W_outs[i]: d_out × d_self
+        # ro_src：读出源层 = 1（底层 x1，输入保真表征）；顶层 x_self 承载自省/条件/记忆。
+        self.ro_src: int = 1
+        self.W_outs: list[np.ndarray | None] = []   # W_outs[i]: d_out × dims[ro_src]
         self.d_out: int = 0
         self.last_e_out: float = 0.0
         # 变换条件嵌入（d_self, n_train）：固定分块正交码（非负、不相交支撑）
@@ -117,6 +119,8 @@ class DeepSRPC:
         self.ro_masks: list[np.ndarray | None] = []
         self.ro_fan: list[int] = []
         self.ro_sig: list = []
+        # 读出头 RLS 协方差逆（ro_alg="rls" 时每头一个 P；翻译器内部状态，局部在线）
+        self.ro_Ps: list[np.ndarray | None] = []
         # 自省环动力学（x_self 的时间预测器）
         nz = self.d_self + max(n_actions, 0)
         self.dyn_nz = nz
@@ -163,12 +167,25 @@ class DeepSRPC:
         self._mac3("fwd", n * fan, d_up * fan, float(d_up * d_lo))
         self.ledger.add(f"act_{l}", n)
 
+    def _ro_src(self) -> np.ndarray:
+        """读出源表征：ro_on_recon=True 时为核心重建 ŝ=W1@x1（符号空间，变换=精确线性映射，
+        读出头逼近置换矩阵，可近精确表示翻转/旋转/重着色）；False 时为原始 x1（旧路径）。
+        """
+        if self.cfg.ro_on_recon:
+            return self.Ws[1] @ self.xs[1]
+        return self.xs[self.ro_src]
+
+    def _ro_dsrc(self) -> int:
+        """读出源维数：重建 = 符号维 dims[0]；原始 = x1 维 dims[ro_src]。"""
+        return self.dims[0] if self.cfg.ro_on_recon else self.dims[self.ro_src]
+
     def _ro_macs(self, idx: int, n_heads: float = 1.0) -> None:
-        """读出头记账（ŝ = W_out @ x_self）。"""
-        fan = self.ro_fan[idx] if idx < len(self.ro_fan) else self.d_self
-        n = float(np.count_nonzero(self.xs[self.L]))
-        self._mac3("readout", n_heads * n * fan, n_heads * self.d_self * fan,
-                   n_heads * float(self.d_out * self.d_self))
+        """读出头记账（ŝ = W_out @ src；src = 重建 ŝ 或 x1）。"""
+        d_src = self._ro_dsrc()
+        fan = self.ro_fan[idx] if idx < len(self.ro_fan) else d_src
+        n = float(np.count_nonzero(self._ro_src()))
+        self._mac3("readout", n_heads * n * fan, n_heads * d_src * fan,
+                   n_heads * float(self.d_out * d_src))
 
     # ------------------------------------------------------------------
     # 方向 1：forward —— 自上而下生成预测
@@ -245,6 +262,7 @@ class DeepSRPC:
                         m_ = float(self.memory.last_macs)
                         self._mac3("mem", m_, m_, m_)
                     u = u + cfg.gamma_mem * (proto - self.xs[l])
+            u = u * cfg.eta_inf   # 推断步长（阻尼，防 W1^TW1 大特征值振荡）
             m = np.abs(u) > cfg.theta_event
             self.xs[l] = np.clip(self.xs[l] + u * m, 0.0, cfg.x_max)
             if cfg.kwta_frac > 0:
@@ -359,35 +377,38 @@ class DeepSRPC:
         return i if self.cond[i] > 0.5 else None
 
     def readout(self) -> np.ndarray:
-        """ŝ = Σ_i cond_i * (W_out_i @ x_self)（条件门控读出）。
+        """ŝ = Σ_i cond_i * (W_out_i @ src)（条件门控读出）。
 
-        one-hot 条件退化为对应单头；组合/随机条件（非 one-hot）为多头加权
-        混合 —— 无信息条件的零样本基线，验证"正确片段重组"优于无信息混合。
+        src = 核心重建 ŝ=W1@x1（符号空间，翻转/旋转/重着色为精确线性映射，读出头
+        逼近置换矩阵 -> 符号保真上限由重建质量决定，W1 实证 LS 可达 0.99）；
+        ro_on_recon=False 时为原始 x1（旧路径，随机扇入掩码与置换结构冲突，上限 0.74）。
+        顶层 x_self 保留为自省/条件/记忆承载层（不变量 4），不承载读出。
         """
         idx = self.head_idx()
         if idx is not None and idx < len(self.W_outs) and self.W_outs[idx] is not None:
             if self.trace:
                 self._ro_macs(idx)
-            return self.W_outs[idx] @ self.xs[self.L]
+            return self.W_outs[idx] @ self._ro_src()
         out = np.zeros(self.d_out)
         if self.cond is not None:
             n_heads = 0
             for i, w in enumerate(self.W_outs):
                 if w is not None and i < len(self.cond):
-                    out = out + self.cond[i] * (w @ self.xs[self.L])
+                    out = out + self.cond[i] * (w @ self._ro_src())
                     n_heads += 1
             if self.trace and n_heads:
                 self._ro_macs(0, float(n_heads))
         return out
 
     def learn_readout(self, s_out: np.ndarray) -> tuple[float, np.ndarray]:
-        """读出学习：只更新当前条件对应的头（ΔW_out_i = lr * e ⊗ x_L，局部外积，免反传）。
+        """读出学习：只更新当前条件对应的头（ΔW_out_i = lr * e ⊗ src，局部外积，免反传）。
 
-        训练任务 i 只更新头 i -> 变换片段知识结构上免遗忘（阶段 B 里程碑）。
-        阶段 C：头创建时即定型稀疏掩码（每 self 维扇入受限），更新后 *= mask
-        —— 变换片段知识长在稀疏结构上，非稠密头裁剪。
+        src = 核心重建 ŝ（符号空间）或 x1；训练任务 i 只更新头 i ->
+        变换片段知识结构上免遗忘（阶段 B 里程碑）。重建源头为稠密（随机扇入掩码
+        与置换结构冲突，W1 实证 LS+掩码 0.74 vs 稠密 0.99），MAC 以事件驱动记账。
         """
         cfg = self.cfg
+        src = self._ro_src()
         idx = self.head_idx()
         if idx is None:
             e = s_out - self.readout()
@@ -397,34 +418,65 @@ class DeepSRPC:
                 self.ro_masks.append(None)
                 self.ro_fan.append(0)
                 self.ro_sig.append(None)
+                self.ro_Ps.append(None)
             if self.W_outs[idx] is None:
-                W = self.rng.uniform(0.0, 0.5, (len(s_out), self.d_self))
-                if cfg.fan_in_ro_frac > 0:
-                    kro = max(1, int(round(cfg.fan_in_ro_frac * len(s_out))))
-                    m = np.zeros(W.shape, dtype=bool)
-                    for j in range(self.d_self):
-                        m[self.rng.choice(len(s_out), size=kro, replace=False), j] = True
-                    self.ro_masks[idx] = m
-                    self.ro_fan[idx] = kro
-                    self.ro_sig[idx] = hash(m.tobytes())
-                    W = _colnorm(W * m)
+                if cfg.ro_on_recon:
+                    # 重建源：零初始化（噪声列不参与 -> 不干扰置换 argmax）+ 稠密
+                    # （随机扇入掩码与置换结构冲突，W1 实证 LS+掩码 0.74 vs 稠密 0.99）。
+                    self.W_outs[idx] = np.zeros((len(s_out), self._ro_dsrc()))
                 else:
-                    self.ro_fan[idx] = self.d_self
-                    W = _colnorm(W)
-                self.W_outs[idx] = W
+                    W = self.rng.uniform(0.0, 0.5, (len(s_out), self._ro_dsrc()))
+                    if cfg.fan_in_ro_frac > 0:
+                        kro = max(1, int(round(cfg.fan_in_ro_frac * len(s_out))))
+                        m = np.zeros(W.shape, dtype=bool)
+                        for j in range(self._ro_dsrc()):
+                            m[self.rng.choice(len(s_out), size=kro, replace=False), j] = True
+                        self.ro_masks[idx] = m
+                        self.ro_fan[idx] = kro
+                        self.ro_sig[idx] = hash(m.tobytes())
+                        W = _colnorm(W * m)
+                    else:
+                        self.ro_fan[idx] = self._ro_dsrc()
+                        W = _colnorm(W)
+                    self.W_outs[idx] = W
+                if cfg.ro_alg == "rls":
+                    # RLS 协方差逆初始化为 δ·I（δ 大 = 信任少，快速起步）
+                    self.ro_Ps[idx] = 10.0 * np.eye(self._ro_dsrc())
                 self.d_out = len(s_out)
-            e = s_out - (self.W_outs[idx] @ self.xs[self.L])
+            e = s_out - (self.W_outs[idx] @ src)
             if self.learning:
-                g = self.xs[self.L] > cfg.readout_gate
-                self.W_outs[idx] += cfg.eta_wout * np.outer(e, self.xs[self.L] * g)
-                if self.ro_masks[idx] is not None:
-                    self.W_outs[idx] *= self.ro_masks[idx]
-                self.W_outs[idx] = _colnorm(self.W_outs[idx])
+                if cfg.ro_alg == "rls":
+                    # 递归最小二乘（RLS）：逐样本、逐输出维独立、免反传。
+                    # 增益 g = P@x/(λ + xᵀP@x) 对所有输出维共享（同一输入回归量），
+                    # 每输出维仅用自己的标量误差 e_k 更新 w_k -> 输出维间不互传误差。
+                    # 病态 x1 特征上收敛远快于 NLMS（B 收尾 W1 实证，见 config 注释）。
+                    P = self.ro_Ps[idx]
+                    z = P @ src
+                    g = z / (cfg.ro_rls_lam + float(np.dot(src, z)))
+                    self.ro_Ps[idx] = (P - np.outer(g, z)) / cfg.ro_rls_lam
+                    self.W_outs[idx] += np.outer(e, g)
+                else:
+                    g = src > cfg.readout_gate
+                    # 归一化 LMS（NLMS）：局部、在线、免反传；按 ||src*g||² 归一化
+                    # 学习率 -> 收敛对 eta 鲁棒（recon 源 256 维回归条件数差，固定 eta 易发散）
+                    denom = float(np.dot(src * g, src * g)) + 1e-8
+                    self.W_outs[idx] += (cfg.eta_wout / denom) * np.outer(e, src * g)
+                    if self.ro_masks[idx] is not None:
+                        self.W_outs[idx] *= self.ro_masks[idx]
+                    if cfg.ro_norm == "clip":
+                        # 列范数超 ro_norm_cap 时投影回 cap 球面：保稳定性，允许达到
+                        # LS 解所需的大尺度（argmax 对尺度不敏感，单位球 cap 会绑死精度）
+                        n = np.linalg.norm(self.W_outs[idx], axis=0, keepdims=True)
+                        over = n[0] > cfg.ro_norm_cap
+                        if over.any():
+                            self.W_outs[idx][:, over] *= cfg.ro_norm_cap / np.maximum(n[:, over], 1e-8)
+                    elif cfg.ro_norm:
+                        self.W_outs[idx] = _colnorm(self.W_outs[idx])
                 if self.trace:
                     fan = self.ro_fan[idx]
-                    self._mac3("learn_ro", float(g.sum()) * fan,
-                               float(self.d_self) * fan,
-                               float(self.d_out * self.d_self))
+                    self._mac3("learn_ro", float(g.sum()) * fan if cfg.ro_alg != "rls" else float(self._ro_dsrc()) * fan,
+                               float(self._ro_dsrc()) * fan,
+                               float(self.d_out * self._ro_dsrc()))
         self.last_e_out = float(np.linalg.norm(e))
         return self.last_e_out, e
 
@@ -508,6 +560,7 @@ class DeepSRPC:
         return dict(
             Ws=[None] + [w.copy() for w in self.Ws[1:]],
             W_outs=[None if w is None else w.copy() for w in self.W_outs],
+            ro_Ps=[None if p is None else p.copy() for p in self.ro_Ps],
             d_out=self.d_out,
             Uc=None if self.Uc is None else self.Uc.copy(),
             Wdyn=self.Wdyn.copy(),
@@ -523,7 +576,7 @@ class DeepSRPC:
                 setattr(self, k, [None] + [x.copy() for x in v[1:]])
             elif k == "xs":
                 setattr(self, k, [x.copy() for x in v])
-            elif k == "W_outs":
+            elif k in ("W_outs", "ro_Ps"):
                 setattr(self, k, [None if w is None else w.copy() for w in v])
             else:
                 setattr(self, k, v.copy() if hasattr(v, "copy") else v)

@@ -54,8 +54,11 @@ def eval_combination(model: DeepSRPC, arc: ArcLite,
         errs_c, errs_r = [], []
         for m in range(clcfg.eval_samples):
             s_in, s_out, _ = arc.sample(nm)
+            # 顺序复合 = 先 t1 读出、解码回输入格式、再以 t2 读出（arc.decode_grid 契约 /
+            # §7.7 写方向：中间读出在离散基底上做 argmax 转回网格再喂入下一段）。
             out1 = model.apply_transform(s_in, c1)
-            out = model.apply_transform(out1, c2)
+            out = model.apply_transform(
+                arc._onehot(arc.decode_grid(out1)).astype(float), c2)
             errs_c.append(float(np.mean((out - s_out) ** 2)))
             # 无信息条件基线：均匀权重（不指向任何任务头），读出为多头混合
             r1 = np.full(arc.n_train, 1.0 / arc.n_train)

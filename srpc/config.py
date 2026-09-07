@@ -198,8 +198,16 @@ class DeepConfig:
     x_max: float = 5.0
     inner_iters: int = 3
     # 规则 1：局部推断（稀疏/事件驱动）
-    alpha: float = 0.15
+    # B 收尾 W1 实证：alpha=0.4 + kwta=0.8 提升 x1 输入保真度
+    # （LS 冻结解 flip_h 色块格正确率 0.82 -> 0.90；kwta=0.5 时 top-50% 剪枝
+    # 会丢掉色块细节，见 docs/SRPC_DESIGN.md §8 里程碑 B 收尾记录）。
+    alpha: float = 0.40
     beta: float = 0.25
+    # B 收尾 W1：推断步长（原 1.0 全步长）。x1 更新为对二次型能量的梯度下降，
+    # 全步长在 W1^TW1 大特征值（重叠感受野列）上振荡发散（3+ 迭代掉精度，
+    # 顶层条件/记忆先验也因迭代不足到不了 x1 -> 记忆增益=0）。
+    # eta_inf<1 阻尼 + 更多内迭代：既稳，又让顶层先验经 4 层下传至 x1。
+    eta_inf: float = 1.0
     theta_event: float = 0.01
     # 规则 2：局部 Hebbian 学习（免反传）
     eta_w: float = 0.05
@@ -216,14 +224,30 @@ class DeepConfig:
     # Uc 为固定分块正交码（非负、不相交支撑 -> 任务编码天然分离，见 set_condition）；
     # 条件直接拉动 x_self 更新（beta_cond 为拉动强度），变换知识由读出层 W_out 学习。
     beta_cond: float = 0.80
-    eta_wout: float = 0.08      # 读出层 W_out 学习率（输入->输出映射）
-    readout_gate: float = 1e-2  # 读出学习突触前活跃门限
+    # --- 读出头（翻译器）学习规则（B 收尾 W1 实证） ---
+    # NLMS（旧默认）在病态 x1 特征上收敛极慢：微缩实验 3000 步后 flip_h 色块格
+    # 正确率仅 ~0.40（e 停在 ~1.5-2），远低于 LS 冻结解上限 0.90 —— 病态条件数
+    # 拖死梯度类步长。RLS（递归最小二乘，逐样本、逐输出维独立、免反传，标准
+    # 自适应滤波）4000 步内逼近 LS 上限（cell 0.993 / 色块格 0.894，kwta0.8+alpha0.4）。
+    # 读出头是 §7.7 机械外围翻译器（无自主动力学），RLS 的 P 矩阵为其内部状态，
+    # 与核心的 Hebbian 局部规则不冲突（核心仍为误差驱动局部学习）。
+    ro_alg: str = "rls"           # 读出头学习规则："rls"（递归最小二乘）/"nlms"（归一化 LMS，旧路径保留对照）
+    ro_rls_lam: float = 0.999     # RLS 遗忘因子（1=无穷记忆；小则更快丢弃旧样本）
+    eta_wout: float = 0.08      # 读出层 W_out 学习率（输入->输出映射；仅 nlms 使用）
+    readout_gate: float = 1e-2  # 读出学习突触前活跃门限（仅 nlms 使用）
+    ro_norm: str = "clip"     # 读出权重更新后归一化："full"=列单位 L2（与生成权重一致）/"clip"=列范数超 ro_norm_cap 时投影回该球面（保稳定性+允许大尺度）
+    ro_norm_cap: float = 6.0  # clip 模式的列范数上限（LS 解列范数均值 ~1.5、最大 ~4.5；cap=6 留裕量防 runaway）
+    # 读出头源：True = 核心重建 ŝ=W1@x1（符号空间，翻转/旋转/重着色都是精确线性映射，
+    # 读出头逼近置换矩阵、可近精确表示变换；B 收尾 W1 实证：LS+随机扇入掩码 0.74 vs 稠密 0.99，
+    # 随机掩码与置换结构冲突 -> 重建源改用稠密头）；False = 原始 x1（旧路径，保留对照）。
+    ro_on_recon: bool = True
     # --- 结构性稀疏（不变量 3：从阶段 A/B 起就是核心算子的数学形式，非训练后裁剪） ---
     # 出生即定型掩码 + k-WTA 激活；学习只更新已有突触（*= mask），结构由构造保证。
     fan_in_frac: float = 0.25     # 生成权重每列扇入占比（层1=连续感受野窗口，内部层=随机扇入）
     fan_in_ro_frac: float = 0.40  # 读出头每 self 维扇入占比
     fan_in_dyn_frac: float = 0.25 # 自省动力学 Wdyn 每列扇入占比
-    kwta_frac: float = 0.50       # k-WTA：每层保留 top-k 激活占比（结构性稀疏激活）
+    kwta_frac: float = 0.80       # k-WTA：每层保留 top-k 激活占比（结构性稀疏激活）
+    # B 收尾 W1：0.5 -> 0.8（LS 冻结解 flip_h 色块格 0.82 -> 0.90；kwta=0.5 剪掉色块细节）
     trace_energy: bool = False    # 有效 MAC 记账（阶段 C 部署度量；默认关，零开销）
 
 
