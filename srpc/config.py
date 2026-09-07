@@ -340,3 +340,87 @@ class AcceptanceCConfig:
     density_max: float = 0.35           # C3：权重总密度上限（出生即稀疏，由构造保证）
     quant_err_ratio_max: float = 1.5    # C4：int8 量化后冻结误差 <= fp 的 1.5 倍
     # C1 能力无回撤 = 稀疏核心上阶段 B 四项验收全部复现（复用 AcceptanceBConfig）
+
+
+# ----------------------------------------------------------------------
+# 阶段 E1（语言化起步）：字节级 UTF-8 词元前端 + 语言长程信用分配小任务
+# 对应 docs/ROADMAP.md 阶段 E1 / docs/SRPC_DESIGN.md §9-2（自建词元前端）
+# ----------------------------------------------------------------------
+
+@dataclass
+class LangConfig:
+    """E1 语言长程信用分配（延迟文本关联）任务与阈值（与 §8.5 早筛同谱系）。
+
+    任务族（字母表 A=16 个 ASCII 字母，流经 ByteTokenizer 的 256 维字节一热，
+    与 ARC 符号编码 / E2 语言流同前端）：
+    - **assoc（延迟关联，主验收任务）**：y_t = π(x_{t-Δ})，π = 固定随机置换。
+      π 为双射且流均匀 => y 边际均匀，与任何单一输入符号**零边际相关**
+      （同 §8.5 判据）——纯相关 Hebbian 一阶统计无信号，只有误差驱动的
+      条件结构学习可解；同时确定性映射信号强，在线单样本可学。
+    - **xorsum（延迟成对 XOR，边界记录）**：y_t = x_{t-Δ-1} ⊕ x_{t-Δ}
+      （4 bit 逐位 XOR，16 类）。在线单样本学习**不可达**（v2 探针证据链，
+      见下），降为在线信用分配边界的记录项，不计入验收。
+
+    **v2 方案调整（2026-09-07，边界探针证据链）**：
+    xorsum@16类 在线失败后逐层排查——(1) 超参全排除（credit 同款超参 /
+    深收敛 64 iters / 学习率 0.05-1.0 / k-WTA / 掩码 / 事件门控 / 感受野
+    窗口 2-3 块均无改善）；(2) **BP 在线对照同样失败**（同形状网络 +
+    Adam 单样本 20k 步 ≈ 机会）——parity 为 SQ-hard 高频函数（Kearns &
+    Valiant 1989; Blum et al. 1994），在线更新的期望梯度≈0，对称无法
+    破缺；(3) **batch 上界 = 1.0**（mini-batch plain SGD 300 epoch 即达）
+    ——任务本身可解；(4) PCN+梯度累积/经验回放均失败（k-WTA/clip 等
+    非标准组件破坏收敛态≈BP 的等效性）。结论：瓶颈 = 在线协议的样本
+    效率，非局部规则原理缺陷；修复路径 = F 阶段记忆回放（慢记忆 ->
+    batch 等效协议，生物学对应睡眠重放），不在 E1 解决。
+    assoc@Δ=16 亦为边界（远端块表征稀释：层1每单元锚定 1 块，1/17
+    覆盖远端，容量不足，非原理性——扩 h1 或感受野可推远）。
+
+    窗口 = 最近 W 步字节一热拼接（延迟线属机械外围序列化，§2.2）；
+    W = Δ+1（assoc）/ Δ+2（xorsum）。远端块（窗口最前 1/2 块）为唯一
+    任务相关块。网络与 CreditPCN 同一套 7.3 局部规则，多类化
+    （x0 -> x1(时间分块感受野) -> x2(随机扇入) -> x3(C 类 one-hot)）。
+
+    阈值预注册（v2，主任务 assoc，Δ=4 主判定）：
+    acc_err >= 0.80、acc_hebb <= 0.20（机会 1/16=0.0625）、
+    gap >= 0.40、远端块权重变化占比 >= 0.25（机会 1/(Δ+1)=0.20）；
+    Δ=8 跨度外推 acc_err >= 0.80。Δ=1 近程对照为记录项。
+    """
+
+    # 任务几何
+    alphabet: str = "abcdefghijklmnop"   # 16 字母（4 bit 码），i.i.d. 均匀流
+    n_classes: int = 16
+    delta: int = 4                       # 延迟跨度（与 §8.5 早筛 Δ=4 同起点）
+    # 网络（CreditConfig 同谱系；按 256 维字节块放大隐层）
+    h1: int = 128                        # L1 隐层（时间分块感受野，每单元锚定一个时间块）
+    h2: int = 64                         # L2 隐层（随机扇入，联合特征层）
+    x_max: float = 5.0
+    settle_iters: int = 24               # err 臂推断收敛迭代（信用回传深度）
+    hebb_settle_iters: int = 8           # hebb 臂浅迭代（纯相关瞬时联想）
+    eta_inf: float = 0.09                # 推断阻尼步长（块正交掩码下谱半径 ~1）
+    alpha: float = 1.5                   # 顶层类拉动 >> 底层重建（同 CreditConfig v2）
+    beta: float = 1.0
+    theta_event: float = 0.01
+    eta_out: float = 0.1                 # 自由输出模式 x3 推断步长
+    # 7.3 规则 2
+    eta_w: float = 0.05
+    theta_syn: float = 1e-2
+    # 不变量 3：出生即结构稀疏
+    fan_in_frac: float = 0.75
+    kwta_frac: float = 0.5
+    kwta_on: bool = True
+    hebb_free: bool = True               # hebb 臂自由推断训练（消除类泄漏）
+    energy_mode: str = "class"           # 钳制-比较能量口径（e1+e2，§8.5 同理）
+    # 协议
+    train_steps: int = 4000
+    eval_steps: int = 600                # 自由推断评估（主口径：acc + BPC）
+    compare_steps: int = 120             # 钳制-比较子样本（协议交叉验证）
+    # 验收阈值（v2 预注册，主任务 assoc，Δ=4 主判定）
+    acc_assoc_min: float = 0.80
+    acc_assoc_d8_min: float = 0.80       # Δ=8 跨度外推
+    acc_hebb_max: float = 0.20           # 纯相关对照上限（机会 1/16）
+    gap_min: float = 0.40                # 误差驱动 - 纯相关
+    distal_assoc_min: float = 0.25       # 远端驱动（机会 1/(Δ+1)=0.20）
+    # 边界记录项（不设验收阈值）：xorsum@{4,16}（在线组合信用分配边界，
+    # SQ-hard + BP 在线对照证据，修复排 F 阶段记忆回放）、assoc@16（远端
+    # 表征稀释边界，容量非原理性）。
+
