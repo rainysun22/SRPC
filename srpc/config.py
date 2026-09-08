@@ -425,6 +425,16 @@ class E2Config:
     #                                   results_e2_gpu/REPORT_E2_GPU_SUMMIT.md）/
     #                                   "clip"=列范数仅截上限（实验：止崩但性能 ~+0.8 BPC）
     x_max: float = 5.0
+    # 稳定性修复：W2 周期谱截断（阶段 E2 GPU 登顶失稳的对因修复，2026-09-08）
+    # 根因：超长预算 × 宽网络的 W2 列对齐塌缩，σmax(W2) 由健康 ~3-4 涨到 ~37，
+    #  自由推断（无引导）收缩性丢失 -> x2 饱和死锁发散（见
+    #  results_e2_gpu/REPORT_E2_GPU_SUMMIT.md §5 与本日研究结论）。
+    # 修复：每 w2_cap_every 步对 W2 做主奇异值谱截断至 w2_smax_cap（局部规则 +
+    #  结构稀疏不变；健康档 σmax≈3-4 远低于 8，cap 不触发即零影响）。
+    w2_cap: bool = False        # 开启周期 W2 谱截断（默认关，保持原行为/校验不变）
+    w2_cap_every: int = 2000    # 每 N 步执行一次（>1 周期；=1 每步，配幂迭代法开销可忽略）
+    w2_smax_cap: float = 8.0    # σmax(W2) 上限
+    w2_pow_iters: int = 6       # 幂迭代次数（估计 W2 顶奇异值，O(n²)，免每步 SVD）
     # 推断（锚点值，E1 谱系）
     settle_iters: int = 12             # 锚点网格 {6,12} 裁定
     eta_inf: float = 0.09

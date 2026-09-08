@@ -99,6 +99,9 @@ class LMPCNg:
         self.n_params_dense = int(src.n_params_dense)
         # 事件率 EMA（GPU 标量，评估点才同步到 CPU）
         self._ev = torch.zeros((), dtype=torch.float32, device=self.device)
+        # 稳定性修复计数器（W2 周期谱截断，见 _maybe_cap_w2）
+        self._n_train = 0
+        self.last_w2_smax = 0.0
         del src
 
     # ---- 规则 1：推断（训练钳制 / 评估自由读出）----
@@ -193,6 +196,38 @@ class LMPCNg:
             over = n > cap
             self.W3[:, over] *= (cap / n[over].clamp_min(1e-8))
 
+    def _maybe_cap_w2(self) -> None:
+        """周期 W2 谱截断（对因稳定性修复，2026-09-08）。
+
+        根因：超长预算 × 宽网络下 W2 列对齐塌缩，σmax(W2) 由健康 ~4.8 涨到
+        ~37，自由推断（无 yoh 引导）收缩性丢失 -> x2 饱和死锁发散（见
+        REPORT_E2_GPU_SUMMIT §5 与 diag 轨迹；s=33.0 万 σmax=4.81 健康，
+        s=34.5 万 σmax=37.6 崩）。修复：每 cfg.w2_cap_every 步对 W2 顶奇异
+        值谱截断至 cfg.w2_smax_cap。用 @cfg.w2_pow_iters 次幂迭代估计顶奇异
+        三元组（O(n²) matvec，免每步 SVD），只削顶奇异值、保留其余谱与结构
+        稀疏/列局部性。局部规则不变，不构造任何梯度；健康档 σmax≤~4.8<
+        5，cap 不触发即零影响。失稳是单侧快速正反馈（1000 步内 5->37），必须
+        持续压住 σmax（w2_cap_every≈1）防止表征在任何时刻被破坏。
+        """
+        cfg = self.cfg
+        if not cfg.w2_cap:
+            return
+        self._n_train += 1
+        if self._n_train % cfg.w2_cap_every != 0:
+            return
+        W = self.W2
+        v = torch.randn(W.shape[1], dtype=torch.float32, device=W.device)
+        for _ in range(cfg.w2_pow_iters):
+            v = W.t() @ (W @ v)
+            v = v / torch.linalg.vector_norm(v).clamp_min(1e-12)
+        Wv = W @ v
+        sig = torch.linalg.vector_norm(Wv)
+        self.last_w2_smax = float(sig)
+        if sig > cfg.w2_smax_cap:
+            u = Wv / sig
+            # 只削顶奇异值：(σmax−cap)·u·vᵀ 从 W2 中减去；就地写回保持图绑定
+            self.W2.copy_(W - (sig - cfg.w2_smax_cap) * torch.outer(u, v))
+
     # ---- 训练步（与 numpy train_step 顺序一致）----
     def train_step(self, x0_np: np.ndarray, y: int) -> float:
         cfg = self.cfg
@@ -200,6 +235,7 @@ class LMPCNg:
         yoh[y] = 1.0
         self._infer(x0_np, yoh, clamp=True)
         self._learn(yoh)
+        self._maybe_cap_w2()
         # 读出头（自由推断 x2 浅迭代 + LMS）
         self._infer(x0_np, None, clamp=False, iters=cfg.readout_iters)
         x2 = self._x2

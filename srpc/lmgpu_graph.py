@@ -170,4 +170,7 @@ class LMPCNgG(LMPCNg):
         yoh[y] = 1.0
         self._yohb.copy_(torch.from_numpy(yoh), non_blocking=True)
         self._graph.replay()
+        # 周期 W2 谱截断（对因修复）：在两次 graph replay 之间就地写回，
+        # 保持图对 W2 同一内存地址的绑定不被破坏。
+        self._maybe_cap_w2()
         return 0.0
