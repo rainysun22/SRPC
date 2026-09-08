@@ -166,7 +166,14 @@ class LMPCNg:
         dW1 = torch.einsum("bi,bj->bij", self._e0c, x1g * g1) * self.s1
         self.W1c += self.eta_w1 * dW1
         n = torch.linalg.vector_norm(self.W1c, dim=1, keepdim=True)
-        self.W1c = self.W1c / n.clamp_min(1e-8)
+        if cfg.w1_norm == "unit":
+            # 能量守恒：每列强制单位范数（赢者列会把弱输入行挤出至 0）
+            self.W1c = self.W1c / n.clamp_min(cfg.w1_norm_eps)
+        else:
+            # clip：列范数仅截上限（≤1），允许弱列自由变弱、不把输入行挤出
+            scale = torch.where(n > 1.0, 1.0 / n.clamp_min(1e-12),
+                                torch.ones_like(n))
+            self.W1c = self.W1c * scale
         self.W1c[self.pad] = 0.0
         self.W1c *= self.s1
         self.W1cT = self.W1c.transpose(1, 2).contiguous()

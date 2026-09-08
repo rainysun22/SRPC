@@ -419,6 +419,11 @@ class E2Config:
     w3_scale: float = 1.0              # W3 读出头列范数尺度（调试：x2 幅度失配）
     w3_norm: str = "unit"              # W3 归一化："unit"=列单位范数 / "clip"=列范数上限
     w3_norm_cap: float = 6.0           # clip 模式列范数上限（防发散）
+    w1_norm_eps: float = 1e-8          # W1c unit 分支列范数除零下限（默认 1e-8；实验：提高仅推迟发散）
+    w1_norm: str = "unit"              # W1c 归一（实验开关，默认 unit=原始行为）：
+    #                                   "unit"=列单位范数（能量守恒；大 h 长训下可能失稳，见
+    #                                   results_e2_gpu/REPORT_E2_GPU_SUMMIT.md）/
+    #                                   "clip"=列范数仅截上限（实验：止崩但性能 ~+0.8 BPC）
     x_max: float = 5.0
     # 推断（锚点值，E1 谱系）
     settle_iters: int = 12             # 锚点网格 {6,12} 裁定

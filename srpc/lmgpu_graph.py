@@ -83,8 +83,15 @@ class LMPCNgG(LMPCNg):
         g2 = (x2 > cfg.theta_syn).to(x2.dtype)
         W1c.add_(self.eta_w1 * torch.einsum("bi,bj->bij", e0c, x1g * g1)
                  * self.s1)
-        W1c.div_(torch.linalg.vector_norm(W1c, dim=1, keepdim=True)
-                 .clamp_min(1e-8))
+        n1 = torch.linalg.vector_norm(W1c, dim=1, keepdim=True)
+        if cfg.w1_norm == "unit":
+            # 能量守恒：每列强制单位范数（赢者列会把弱输入行挤出至 0）
+            W1c.div_(n1.clamp_min(cfg.w1_norm_eps))
+        else:
+            # clip：列范数仅截上限（≤1），允许弱列自由变弱、不把输入行挤出
+            scale = torch.where(n1 > 1.0, 1.0 / n1.clamp_min(1e-12),
+                                torch.ones_like(n1))
+            W1c.mul_(scale)
         W1c.masked_fill_(self.pad.unsqueeze(-1), 0.0)
         W1c.mul_(self.s1)
         self.W1cT.copy_(W1c.transpose(1, 2))     # 同步连续转置（评估用）
