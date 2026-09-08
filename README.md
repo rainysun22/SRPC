@@ -38,6 +38,8 @@ srpc/
   credit.py      # 信用分配早筛（阶段 A 承重墙）：延迟 XOR + 误差/纯相关双臂对照
   lang.py        # ByteTokenizer 字节级 UTF-8 词元前端（阶段 E1）：256 维一热 = 正交基底
   lm.py          # LMPCN 语言模型（阶段 E2）：µPC 参数化 + 独立线性读出头 + iPC 增量调度 + 孪生对照
+  lmgpu.py       # LMPCNg：E2 GPU 登顶跑 torch 移植（权重真源 = numpy 同 seed；无 autograd）
+  lmgpu_graph.py # LMPCNgG：CUDA-Graph 捕获整训练步（就地更新，~10×；GPU_TASKS T1）
   energy.py      # EnergyLedger 三口径 MAC 记账 + 大模型标尺 llm_task_macs（阶段 C）
   metrics.py     # 指标：感受野对齐、NMI、恢复统计、零样本组合泛化
   plots.py       # 可视化（阶段 A）
@@ -49,6 +51,10 @@ scripts/
   run_phaseC.py  # 阶段 C 入口：结构稀疏核心双臂 + 能耗/结构/量化验收
   run_e1.py      # 阶段 E1 入口：字节词元质检 + assoc/xorsum 长程信用分配 + 验收
   run_e2.py      # 阶段 E2 入口：锚点网格 + 1/2/4M 梯子 + BPTT 孪生 + iPC 消融 + 验收报告
+  run_e2_summit.py        # E2 GPU 登顶跑单档（tinyshakespeare 全 epoch；--resume 断点续跑）
+  run_e2_summit_all.py    # E2 登顶全流程编排（5 档 PCN → 5 档孪生 → 自动报告，幂等续跑）
+  e2_gpu_parity.py        # 移植 parity（numpy vs torch CPU）+ GPU 冒烟基准
+  build_e2_summit_report.py  # E2 登顶裁决报告（全预算单调性/斜率/比值判定）
 docs/
   SRPC_DESIGN.md  # 设计文档 v1.9（§7.5 阶段 A 六项验收 / §8.5 信用分配早筛 / §8 里程碑 / §9 开放问题）
   ROADMAP.md      # 后续路线图（E 语言化 / F 知识+持续学习 / G 推理规划 / D 意识向）
@@ -58,6 +64,7 @@ results_phaseB/   # 阶段 B：同上
 results_phaseC/   # 阶段 C：同上
 results_e1/       # 阶段 E1：词元质检 + 长程信用分配验收
 results_e2/       # 阶段 E2：锚点网格 / 梯子 / 孪生 / iPC / 验收报告
+results_e2_gpu/   # 阶段 E2 GPU 登顶跑：全 epoch 梯子 / 孪生 / parity / 裁决报告
 ```
 
 ## 快速开始
@@ -127,7 +134,7 @@ python scripts/run_phaseC.py --steps 200  # 冒烟测试
 | 子阶段 | 状态 | 关键证据 |
 |---|---|---|
 | E1 词元前端 + 长程信用分配 | ✅ 收口（5/5 PASS） | ByteTokenizer（字节级 UTF-8，256 维一热，7 组多语/emoji/控制字符往返质检全过）；assoc 延迟文本关联主验收 acc 0.995 / gap 0.818 / Δ=8 外推 0.985（3 seeds）；xorsum 在线不可达归因 parity SQ-hard（BP 在线同样失败，batch 可解），修复排 F1 记忆回放。见 [results_e1/report.md](results_e1/report.md) |
-| E2 缩放梯子 + 孪生对照 | ✅ pilot 收口（判据 2/3/4 PASS，判据 1 转 GPU） | µPC 参数化零调参迁移（锚点 iters=12 / eta_w=0.01，BPC 4.529 下穿 unigram 4.797）+ 独立线性读出头（W_out+bias 承载 unigram 先验）+ iPC 增量调度采纳；梯子 1/2/4M BPC 4.256/4.213/4.238，BP 孪生 3.500/3.464/3.530，PCN:孪生恒 1.20–1.22×；判据 1 单调性 pilot 与孪生同步回退 → 数据量瓶颈定性，8M/15M 登顶裁决转 [docs/GPU_TASKS.md](docs/GPU_TASKS.md) T1/T2。见 [results_e2/report.md](results_e2/report.md) |
+| E2 缩放梯子 + 孪生对照 | ✅ pilot 收口（判据 2/3/4 PASS，判据 1 转 GPU 裁决）→ **GPU 登顶跑执行中（2026-09-08）** | µPC 参数化零调参迁移（锚点 iters=12 / eta_w=0.01，BPC 4.529 下穿 unigram 4.797）+ 独立线性读出头（W_out+bias 承载 unigram 先验）+ iPC 增量调度采纳；梯子 1/2/4M BPC 4.256/4.213/4.238，BP 孪生 3.500/3.464/3.530，PCN:孪生恒 1.20–1.22×；判据 1 单调性 pilot 与孪生同步回退 → 数据量瓶颈定性，**全预算裁决跑（torch/CUDA-Graph 移植 ~10×，全 epoch 1M–15M 梯子 + 孪生）后台进行中**，见 [results_e2/report.md](results_e2/report.md) / [results_e2_gpu/](results_e2_gpu/report.md) 与 [docs/GPU_TASKS.md](docs/GPU_TASKS.md) T1/T2 |
 
 ## A/B 实验设计
 

@@ -5,3 +5,4 @@ venv/
 .uploads/
 .DS_Store
 results_phaseC_smoke/
+results_e2_gpu/*.pt

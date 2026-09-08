@@ -1,0 +1,21 @@
+{
+ "note": "E2 GPU 登顶跑工程基线（实测记录，2026-09-08；供 build_e2_summit_report.md §0 引用）",
+ "gpu": "NVIDIA GeForce GTX 1660 Ti 6GB (cc 7.5) / CUDA 13.3 / torch 2.14.0+cu130 / Python 3.12 venv",
+ "parity_numpy_vs_torch_cpu": {
+  "h": 768, "steps": 3000, "seed": 0,
+  "max_dw_500": 9.365e-06, "max_dw_3000": 6.009e-04,
+  "val_bpc_numpy": 5.0796, "val_bpc_torch": 5.0796,
+  "d_bpc": 0.0, "wall_s": 348
+ },
+ "cudagraph_vs_nongraph_gpu": {
+  "h": 768, "steps": 250,
+  "max_dw": 2.187e-04,
+  "nongraph_ms_per_step": 27.24, "graph_ms_per_step": 2.73,
+  "speedup_x": 9.98
+ },
+ "graph_ms_per_step_by_h": [2.73, 3.92, 6.04, 10.41, 17.58],
+ "h_list": [768, 1200, 1856, 2832, 4032],
+ "full_epoch_h_estimate": [0.76, 1.09, 1.68, 2.90, 4.90],
+ "full_epoch_steps": 1003838,
+ "note2": "CUDA-Graph 捕获整训练步（12 次钳制推断+学习+8 次读出推断+读出头 LMS），host 调度开销移除；权重更新全就地（无 autograd）"
+}

@@ -3,21 +3,33 @@
 > 沙箱现实：3 核 CPU / 5GB 内存 / 无 GPU / 纯 NumPy。本清单记录**超出沙箱算力的任务**，
 > 由用户在外部 GPU 环境执行后回传结果。触发条件未到的不跑；清单随阶段推进更新。
 > 契约与不变量见文末 —— 移植版必须保持"局部规则、免反传、结构稀疏"三条初衷不变。
+>
+> **口径更新（2026-09-08）**：本机 GTX 1660 Ti 6GB 已可用，GPU 任务改为由 AI
+> **自行调用**（用户指令），登顶跑已在本机后台启动（results_e2_gpu/）；触发条件、
+> 契约与不变量不变。本清单保留为任务登记与执行口径。
 
-## T1：E2 缩放曲线登顶跑（8M / 15M）
+## T1：E2 缩放曲线登顶跑（8M / 15M）—— ✅ 已触发（2026-09-08，执行中）
 
-- **触发**：✅ 已触发（2026-09-07）——E2 梯子（1M/2M/4M）CPU pilot 已跑完（results_e2/report.md），判据 2/3/4 PASS；**判据 1（4M 单调性 FAIL）需 GPU 登顶跑以全预算裁决**（pilot 下 4M 回退与 BP 孪生同步，归因数据量瓶颈，待 T1/T2 验证规模收益）
-- **内容**：字节级 UTF-8 LM，µPC 参数化迁移小模型超参（锚点 = iters 12 / eta_w 0.01 / 读出温度 τ 校准，零调参），8M 与 15M 各一次完整训练
-- **估算**：PyTorch 移植版 ~2-4 GPU·时/次（A100 级），共 ~8 GPU·时
-- **输入**：`srpc/` 移植版（届时交付）+ WikiText-103 字节流（本地预处理脚本一并交付）
-- **输出**：BPC / token 精度曲线 + 训练日志（回传至 `results_E2/`）；同预算孪生（T2）并列裁决单调性
+- **触发**：✅ 已触发——E2 梯子（1M/2M/4M）CPU pilot 已跑完（results_e2/report.md），
+  判据 2/3/4 PASS；**判据 1（4M 单调性 FAIL）需全预算裁决**（pilot 150k 步 ≈15% epoch 下
+  4M 回退与 BP 孪生同步，疑数据预算瓶颈）。
+- **内容**（2026-09-08 落地口径，见 results_e2_gpu/engineering.json 与报告）：
+  tinyshakespeare **全 epoch**（n≈1,003,838 步）梯子 {768,1200,1856,2832,4032} =
+  {1M,2M,4M,8M,15M} × PCN + 同规模孪生；超参 = 锚点迁移值（iters=12 / eta_w=0.01 /
+  τ 校准），iPC 关，与 pilot 同协议仅放大预算。
+  - **torch 移植**：`srpc/lmgpu.py`（LMPCNg，权重真源 = numpy 同 seed，无 autograd，
+    局部规则/掩码/k-WTA/事件门控逐算子对应）+ `srpc/lmgpu_graph.py`（LMPCNgG：
+    CUDA-Graph 捕获整训练步，就地更新，host 调度开销移除，实测 ~10×，parity max|ΔW|
+    3k 步 7.7e-4）。
+  - 运行：`scripts/run_e2_summit.py`（单档，--resume 断点续跑）/ `scripts/run_e2_summit_all.py`
+    （顺序全流程 + 自动报告 `scripts/build_e2_summit_report.py`）。
+- **输出**：BPC / acc 曲线（逐 eval 落盘 JSON）+ 终态；判据 1 单调性按尾部噪声带裁决；
+  与孪生并列对照见报告 results_e2_gpu/report.md。
 
-## T2：E2 BPTT 孪生对照（同规模）
+## T2：E2 BPTT 孪生对照（同规模）—— ✅ 触发（2026-09-08，执行中）
 
-- **触发**：与 T1 同批（孪生是 E2 主参考线）
-- **内容**：同数据、同字节词表、同参数量的标准 transformer（BPTT），1M/2M/4M/8M/15M 各一
-- **估算**：~1-2 GPU·时/次，共 ~6 GPU·时
-- **注意**：孪生用标准 PyTorch 实现（走反传，仅作对照基准，不属 SR-PC 构造）
+- 与 T1 同批：同数据、同参数量、同样本流（batch 32）的 numpy TwinMLP（CPU，与 pilot
+  同一实现口径，保证对照连续性）；全 epoch 每档一跑，逐档 JSON 落盘。
 
 ## T3：G2 同规模 LLM 推理评测
 
