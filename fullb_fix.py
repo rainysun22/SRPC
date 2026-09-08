@@ -1,11 +1,11 @@
-"""h=1856(3.89M) 全预算重训（判据1重判 / 对照 A-B），开启每步 W2 谱截断修复。
+"""h 档全预算重训（判据1重判），开启每步 W2 谱截断修复。
 
 与 scripts/run_e2_summit.py run_pcn 同口径（同 seed、同语料、同 eval_batch/fit_tau），
 仅：
   - cfg.w2_cap=True, w2_cap_every=1, w2_smax_cap=5.0（每步幂迭代截断，对因修复）
-  - 保存到 RES="results_e2_gpu_fix"（不动原始崩溃跑 pcn_1856.*）
-  - eval_every=30000（探针粒度，含末步）
-用途：重判判据1（全预算单调性）在修复下的健康收敛（原 3.89M 档 s≈33万发散）。
+  - 保存到 RES="results_e2_gpu_fix"（不动原始崩溃跑 pcn_<h>.*）
+用例：python -B fullb_fix.py <h> [max_steps] [eval_every]
+  h ∈ {1856,2832,4032}；max_steps 缺省 = 全 epoch（len-ctx-1）；eval_every 缺省 30000。
 """
 from __future__ import annotations
 import json, os, sys, time
@@ -21,17 +21,22 @@ from srpc.lmgpu_graph import LMPCNgG
 RES = "results_e2_gpu_fix"
 os.makedirs(RES, exist_ok=True)
 
+h = 1856
+if len(sys.argv) > 1:
+    h = int(sys.argv[1])
+assert h % 16 == 0 and h in (768, 1200, 1856, 2832, 4032), f"bad h={h}"
+
 cfg = E2Config()
-cfg.eval_every = 30_000
+cfg.eval_every = int(sys.argv[3]) if len(sys.argv) > 3 else 30_000
 cfg.w2_cap = True
 cfg.w2_cap_every = 1
 cfg.w2_smax_cap = 5.0
 cfg.w2_pow_iters = 8
 
-h = 1856
 seed = 0
 corpus = ByteCorpus(cfg)
-steps = len(corpus.train) - cfg.context - 1
+full = len(corpus.train) - cfg.context - 1
+steps = int(sys.argv[2]) if len(sys.argv) > 2 else full
 name = f"pcn_{h}"
 ckpt_p = os.path.join(RES, f"{name}_fix.pt")
 meta = {"h": h, "kind": "pcn+fix", "steps": steps,
