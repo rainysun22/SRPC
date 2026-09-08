@@ -1,0 +1,4 @@
+== anchor grid (h=768) ==
+  iters=12 eta_w=0.005: bpc=8.231 acc=0.000 wall=313.5s
+  iters=12 eta_w=0.01: bpc=8.363 acc=0.000 wall=319.7s
+  iters=24 eta_w=0.005: bpc=8.300 acc=0.000 wall=446.5s

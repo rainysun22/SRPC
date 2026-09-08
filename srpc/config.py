@@ -411,8 +411,14 @@ class E2Config:
     ladder_widths: tuple = (768, 1200, 1856)   # h1=h2（16 整除，锚点均衡）
     h_ref: int = 768                   # µPC 适配锚定宽度（= 1M 档）
     rf_blocks: int = 2                 # L1 单元感受野 = 相邻 rf_blocks 个时间块
+    # 不变量 3：出生即结构稀疏
     fan_in_frac: float = 0.75          # W2/W3 随机扇入占比（不变量 3）
     kwta_frac: float = 0.5
+    kwta_on: bool = True
+    kwta_every_iter: bool = False      # 宽网络默认仅循环末一次（死锁修复）
+    w3_scale: float = 1.0              # W3 读出头列范数尺度（调试：x2 幅度失配）
+    w3_norm: str = "unit"              # W3 归一化："unit"=列单位范数 / "clip"=列范数上限
+    w3_norm_cap: float = 6.0           # clip 模式列范数上限（防发散）
     x_max: float = 5.0
     # 推断（锚点值，E1 谱系）
     settle_iters: int = 12             # 锚点网格 {6,12} 裁定
@@ -421,19 +427,28 @@ class E2Config:
     beta: float = 1.0
     theta_event: float = 0.01
     eta_out: float = 0.1
+    tau: float = 0.5                  # 读出温度（训练固定；评估经校准切片定）
+    # 独立读出头（阶段 B §7.7 翻译器谱系；E2 类非均匀，W3 LS 读出去
+    # 频率先验 => 线性头 W_out + bias，列幅度 ∝ 频率承载 unigram）
+    readout_lr: float = 0.05          # 读出头 LMS 学习率
+    readout_tau: float = 0.1          # 读出头训练温度（自由推断 x2 判分）
+    readout_iters: int = 8            # 读出头自由推断浅迭代（省算力，评估深迭代）
     # 学习（锚点值）
-    eta_w: float = 0.05                # 锚点网格 {0.02,0.05} 裁定
+    eta_w: float = 0.005               # 锚点网格 {0.005,0.01} 裁定（探针：0.005@24iters 最优）
     theta_syn: float = 1e-2
     # 运行预算（pilot）
     anchor_steps: int = 20000          # 锚点网格每配置步数
     ladder_steps: int = 150000         # 梯子每档步数（≈13% epoch）
     control_steps: int = 20000         # 4M 重调对照每配置步数
     ipc_steps: int = 120000            # iPC 消融步数
-    eval_every: int = 10000
+    eval_every: int = 15000
     eval_windows: int = 800
     eval_stride: int = 70              # 验证窗口间隔（覆盖验证段全程）
-    tau_grid: tuple = (0.15, 0.25, 0.4, 0.6, 0.9, 1.3)  # 读出温度网格
-    tau_cal_windows: int = 300         # τ 校准切片（验证段前 300 窗口）
+    tau_grid: tuple = (0.02, 0.05, 0.1, 0.2, 0.35, 0.6, 1.0)  # 读出温度网格
+    tau_cal_windows: int = 200         # τ 校准切片（验证段前 200 窗口）
+    # 锚点/重调网格（1M 档裁定；4M 对照同网格）
+    anchor_iters: tuple = (12, 24)
+    anchor_eta: tuple = (0.005, 0.01)   # 探针证据：0.005@24iters 最优（BPC 5.50@10k）
     # 孪生
     twin_batch: int = 32
     twin_lr: float = 1e-3

@@ -138,40 +138,55 @@ class LMPCN:
             m3[rng.choice(h, size=k3, replace=False), j] = True
         self.m2, self.m3 = m2, m3
         self.W2 = _colnorm((rng.normal(0.0, 1.0, (h, h)) * m2).astype(np.float32))
-        self.W3 = _colnorm((rng.normal(0.0, 1.0, (h, self.C)) * m3)
-                           .astype(np.float32))
+        self.W3 = (_colnorm((rng.normal(0.0, 1.0, (h, self.C)) * m3)
+                            .astype(np.float32)) * cfg.w3_scale)
         # ---- 状态与账本 ----
         self.x1g = np.zeros((self.W, self.per), dtype=np.float32)
         self.x2 = np.zeros(h, dtype=np.float32)
+        # ---- 独立读出头（阶段 B §7.7 翻译器谱系）----
+        # W3 是生成权重（钳制塑形 x2 类原型）；读出职责交给 W_out 线性头 +
+        # bias：列幅度 ∝ 更新次数 ∝ 频率 => 承载 unigram 先验（LS 收敛
+        # 读出会归一化列幅度、在类非均匀下丢先验——E2 与 E1 的差异点）。
+        self.W_out = (rng.normal(0.0, 0.01, (h, self.C))).astype(np.float32)
+        self.b_out = np.zeros(self.C, np.float32)
         self.learning = True
+        self.tau = cfg.tau               # 读出温度（训练固定；评估经校准）
         self.n_params_struct = int(h * self.r * 256 + m2.sum() + m3.sum())
         self.n_params_dense = int(self.W * 256 * h + h * h + h * self.C)
         self.event_frac = 0.0           # 事件率（EMA，稀疏账本）
         self._ev_n = 0
 
-    # ---- 规则 1：推断（训练钳制 / 评估自由）----
+    # ---- 规则 1：推断（训练钳制 / 评估自由 LS 读出）----
     def _infer(self, x0: np.ndarray, yoh: np.ndarray | None,
-               block_mask: np.ndarray | None = None) -> None:
-        """block_mask: (W,) bool——iPC 课程的有效上下文块（None = 全开）。"""
+               block_mask: np.ndarray | None = None,
+               clamp: bool = False, iters: int | None = None,
+               free_out: bool | None = None) -> None:
+        """clamp=True（训练）：x3 钳制目标 one-hot（信用分配塑形 x2）；
+        clamp=False（评估/读出）：自由推断取 x2（类信息经 W_out 线性读出，
+        判分不走 x3）。x3 收敛仅当 free_out=True（E1 谱系对照路径）。
+
+        iters: 覆盖 self.iters（读出头自由推断用浅迭代省算力）。
+        """
         cfg = self.cfg
         a, b_ = cfg.alpha, cfg.beta
         x0p = np.concatenate([x0.ravel(), np.zeros(1, np.float32)])
         if block_mask is not None:
-            # 无效块的 x0rf 行清零（一热行级掩码，块粒度）
+            # 无效块（iPC 远端课程掩码，块粒度）：不可见块字节清零后再收集
             bm = np.repeat(block_mask, 256)
-            x0rf = x0p[self.idx_rf] * bm[:, None]
-        else:
-            x0rf = x0p[self.idx_rf]
+            x0p = x0p * np.concatenate([bm, np.ones(1, np.float32)])
+        x0rf = x0p[self.idx_rf]
         x1g = np.zeros_like(self.x1g)
         x2 = np.zeros_like(self.x2)
-        x3 = np.zeros(self.C, np.float32) if yoh is None else yoh.copy()
+        x3 = yoh.copy() if clamp else np.zeros(self.C, np.float32)
         W1c, W1cT = self.W1c, self.W1cT
         th = cfg.theta_event
-        for _ in range(self.iters):
+        it = self.iters if iters is None else iters
+        do_out = (not clamp) if free_out is None else free_out
+        for _ in range(it):
             # e0（块紧凑）：pred0[b] = s1·W1c[b] @ x1g[b]
             pred0 = np.matmul(W1c, x1g[:, :, None])[:, :, 0]
             e0c = x0rf - pred0
-            # e1 / e2（平坦方向）
+            # e1 / e2（平坦方向；x3 = 钳制目标 / 自由读出变量）
             x1 = x1g.ravel()
             e1 = x1 - self.W2 @ x2
             e2 = x2 - self.W3 @ x3
@@ -185,13 +200,20 @@ class LMPCN:
             g2 = np.abs(u2) > th
             x1g = np.clip(x1g + self.et1 * u1 * g1, 0.0, cfg.x_max)
             x2 = np.clip(x2 + self.et2 * u2 * g2, 0.0, cfg.x_max)
-            # k-WTA（整层竞争）
-            x1g = _kwta2d(x1g, cfg.kwta_frac)
-            x2 = _kwta(x2, cfg.kwta_frac)
-            if yoh is None:      # 自由输出：x3 梯度下降（LS 读出动力学）
+            if cfg.kwta_every_iter:
+                # 每迭代 k-WTA（E1 谱系）：宽网络下增量小、保留旧子集，
+                # 新单元难激活（死锁）——默认仅循环末一次，见 kwta_every_iter。
+                x1g = _kwta2d(x1g, cfg.kwta_frac)
+                x2 = _kwta(x2, cfg.kwta_frac)
+            if do_out:
+                # x3 自由变量（能量梯度 LS 读出，E1 谱系对照路径；E2 主
+                # 判分走 W_out 线性读出，见 eval_batch）
                 e2 = x2 - self.W3 @ x3
                 x3 = np.clip(x3 + cfg.eta_out * (self.W3.T @ e2),
-                             0.0, cfg.x_max)
+                             0.0, 1.0)
+        # k-WTA（循环末一次：竞争选择活跃表征，保持整层稀疏，不变量 3）
+        x1g = _kwta2d(x1g, cfg.kwta_frac)
+        x2 = _kwta(x2, cfg.kwta_frac)
         # 事件率账本（EMA）
         self.event_frac += ((float(g1.mean() + g2.mean()) / 2)
                             - self.event_frac) * 0.01
@@ -217,35 +239,70 @@ class LMPCN:
         self.W1cT = np.ascontiguousarray(self.W1c.transpose(0, 2, 1))
         # dW2 / dW3（平坦，掩码 + 列归一，E1 同款）
         dW2 = np.outer(self._e1, self._x2 * g2)
+        # dW3 = e2 ⊗ yoh：生成权重，只更新目标类列（E1 同款原型学习，
+        # e2 为钳制收敛误差 x2−W3@yoh，把列 y 拉向类 y 的 x2 原型；
+        # 评估经 W3ᵀ 线性读出判分）
         dW3 = np.outer(self._e2, yoh)
         self.W2 += (self.eta_w2 * dW2).astype(np.float32)
         self.W3 += (self.eta_w3 * dW3).astype(np.float32)
         self.W2 *= self.m2
         self.W3 *= self.m3
         self.W2 = _colnorm(self.W2)
-        self.W3 = _colnorm(self.W3)
+        if self.cfg.w3_norm == "unit":
+            # 列单位范数（E1 谱系）：抹掉频率幅度（unigram 先验缺失的根源，
+            # 仅适用均匀类任务）
+            self.W3 = _colnorm(self.W3) * self.cfg.w3_scale
+        else:
+            # clip：列幅度自由生长（dW3=e2⊗yoh 每步只更新目标类列，
+            # 高频列累积更大幅度 => 读出承载 unigram 先验），防发散
+            n = np.linalg.norm(self.W3, axis=0)
+            cap = self.cfg.w3_norm_cap
+            over = n > cap
+            self.W3[:, over] *= cap / np.maximum(n[over], 1e-8)
 
     def train_step(self, x0: np.ndarray, y: int,
                    block_mask: np.ndarray | None = None) -> float:
+        """钳制信用分配（塑形 x2 类结构）+ 核心局部学习 + 读出头 LMS。
+
+        读出头在自由推断 x2 上训练（与评估同协议，E1 hebb_free 同思想）：
+        浅迭代省算力；W_out/b_out 为机械外围翻译器（§7.7），列幅度 ∝
+        频率承载 unigram 先验。
+        """
+        cfg = self.cfg
         yoh = np.zeros(self.C, np.float32)
         yoh[y] = 1.0
-        self._infer(x0, yoh, block_mask)
+        self._infer(x0, yoh, block_mask, clamp=True)
         self._learn(yoh)
+        # 读出头（自由推断 x2，浅迭代）
+        self._infer(x0, None, block_mask, clamp=False,
+                    iters=cfg.readout_iters)
+        x2 = self._x2
+        logit = self.W_out.T @ x2 + self.b_out
+        p = _softmax(logit / cfg.readout_tau)
+        err = p.copy()
+        err[y] -= 1.0
+        self.W_out -= (cfg.readout_lr * np.outer(x2, err)).astype(np.float32)
+        self.b_out -= (cfg.readout_lr * err).astype(np.float32)
         return float(np.linalg.norm(self._e0c))
 
-    # ---- 冻结评估：自由推断 + softmax(x3/τ) ----
+    # ---- 冻结评估：线性读出头（训练/评估同协议）----
     def eval_batch(self, X: np.ndarray, y: np.ndarray, tau: float,
                    block_mask: np.ndarray | None = None
                    ) -> tuple[float, float]:
-        """返回 (BPC, acc)。X: (n, W, 256)。"""
+        """返回 (BPC, acc)。X: (n, W, 256)。
+
+        自由推断（深迭代）取 x2，W_out 线性读出 + bias（承载 unigram
+        先验），softmax(·/τ) 计 BPC。
+        """
         self.learning = False
+        self.tau = tau
         nll = acc = 0.0
         for i in range(len(y)):
             self._infer(X[i].ravel(), None, block_mask)
-            z = self._x3 / tau
-            p = _softmax(z)
+            logit = self.W_out.T @ self._x2 + self.b_out
+            p = _softmax(logit / tau)
             nll -= np.log2(max(p[y[i]], 1e-12))
-            acc += float(self._x3.argmax() == y[i])
+            acc += float(p.argmax() == y[i])
         self.learning = True
         return float(nll / len(y)), float(acc / len(y))
 
@@ -390,11 +447,17 @@ def train_lmpcn(cfg: E2Config, h: int, steps: int, corpus: ByteCorpus,
 
 def train_twin(cfg: E2Config, target_params: int, steps: int,
                corpus: ByteCorpus, seed: int = 0) -> dict:
-    """孪生 BP 参照：同样本流、同样本数（batch 化）。"""
+    """孪生 BP 参照：同样本流、同样本数（batch 化）。
+
+    评估与 PCN 同口径：同验证段（val_x[tau_cal_windows:] 起的窗口，
+    与 LMPCN 校准后剩余段一致）。
+    """
     rng = np.random.default_rng(seed * 977 + 9)
     tw = TwinMLP(cfg, target_params, rng)
     t0 = time.time()
     B = cfg.twin_batch
+    rep_x = corpus.val_x[cfg.tau_cal_windows:]
+    rep_y = corpus.val_y[cfg.tau_cal_windows:]
     curve = []
     for t0b in range(0, steps, B):
         n = min(B, steps - t0b)
@@ -407,12 +470,10 @@ def train_twin(cfg: E2Config, target_params: int, steps: int,
         tw.train_batch(X.reshape(n, -1), ys, cfg.twin_lr)
         t = t0b + n
         if t % cfg.eval_every == 0 or t == steps:
-            bpc, acc = tw.eval_batch(corpus.val_x.reshape(len(corpus.val_y), -1),
-                                     corpus.val_y)
+            bpc, acc = tw.eval_batch(rep_x.reshape(len(rep_y), -1), rep_y)
             curve.append(dict(step=t, bpc=bpc, acc=acc,
                               wall=round(time.time() - t0, 1)))
-    bpc, acc = tw.eval_batch(corpus.val_x.reshape(len(corpus.val_y), -1),
-                             corpus.val_y)
+    bpc, acc = tw.eval_batch(rep_x.reshape(len(rep_y), -1), rep_y)
     return dict(bpc=bpc, acc=acc, curve=curve, n_params=tw.n_params,
                 wall=round(time.time() - t0, 1))
 

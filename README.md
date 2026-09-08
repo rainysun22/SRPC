@@ -1,10 +1,11 @@
 # SR-PC（自省式预测编码）演化智能系统
 
-Self-Reflective Predictive Coding：从"最小化预测误差"这一条内置规则出发，通过与世界交互在线长出**形成 - 修正 - 组合**能力的演化智能系统原型。对应设计文档 [docs/SRPC_DESIGN.md](docs/SRPC_DESIGN.md)（v1.7，大模型仅作能力评测基准、不进系统构造），后续路线（E / F / G / D）见 [docs/ROADMAP.md](docs/ROADMAP.md)：
+Self-Reflective Predictive Coding：从"最小化预测误差"这一条内置规则出发，通过与世界交互在线长出**形成 - 修正 - 组合**能力的演化智能系统原型。对应设计文档 [docs/SRPC_DESIGN.md](docs/SRPC_DESIGN.md)（v1.9，大模型仅作能力评测基准、不进系统构造），后续路线（E / F / G / D）见 [docs/ROADMAP.md](docs/ROADMAP.md)：
 
 - **阶段 A（Phase-0 原型）**：原理自证 —— 形成、修正、组合的最小闭环 + 信用分配早筛（承重墙）
 - **阶段 B（规模化与组合）**：深层预测编码（DeepSRPC）、多时间尺度记忆（PrototypeMemory）、ARC-lite 组合基准、顺序学习免遗忘 —— 主验收 3/4 过（learn / forget / combo）；**记忆增益项经 E0 收口重定性为原理性不可达**（ARC-lite 为 i.i.d. 映射，记忆先验无增量信息——b1 零距离耦合/单头遗忘压力消融均证 ≈0%；非架构债务，"能力=记忆·拼合"验证迁移 E3 语言流 / F3 ICL）；B 收尾 W1（符号保真自测 + 预算记账）8/8 过。证据见 [results_phaseB/report_w1.md](results_phaseB/report_w1.md) / [results_phaseB/report_e0.md](results_phaseB/report_e0.md)
 - **阶段 C（内在低功耗，软件版）**：出生即结构稀疏（分块/扇入受限 + k-WTA）+ 三口径 MAC 记账 + 大模型能效标尺 + int8 部署就绪 —— 低功耗是架构本身的属性，非训练后裁剪；**已锁定**，硬件化 deferred 至有专用硬件
+- **阶段 E（语言化，进行中）**：字节级 UTF-8 词元前端 + 语言长程信用分配 + 缩放梯子 —— **E1 已收口**（主验收 5/5 PASS，assoc 延迟文本关联）；**E2 pilot 已收口**（µPC 参数化 + 独立线性读出头 + iPC 增量调度，1/2/4M 梯子 vs BPTT 孪生 1.20–1.22×，判据 2/3/4 PASS；判据 1 单调性转 GPU 登顶裁决 [docs/GPU_TASKS.md](docs/GPU_TASKS.md) T1/T2）。证据见 [results_e1/report.md](results_e1/report.md) / [results_e2/report.md](results_e2/report.md)
 
 ## 核心特性
 
@@ -35,6 +36,8 @@ srpc/
   runner_b.py    # 顺序学习免遗忘 + 组合零样本 + 验收判定（阶段 B）
   runner_c.py    # 阶段 C 主流程：稀疏/稠密双臂 + 能耗测量 + C1-C4 验收
   credit.py      # 信用分配早筛（阶段 A 承重墙）：延迟 XOR + 误差/纯相关双臂对照
+  lang.py        # ByteTokenizer 字节级 UTF-8 词元前端（阶段 E1）：256 维一热 = 正交基底
+  lm.py          # LMPCN 语言模型（阶段 E2）：µPC 参数化 + 独立线性读出头 + iPC 增量调度 + 孪生对照
   energy.py      # EnergyLedger 三口径 MAC 记账 + 大模型标尺 llm_task_macs（阶段 C）
   metrics.py     # 指标：感受野对齐、NMI、恢复统计、零样本组合泛化
   plots.py       # 可视化（阶段 A）
@@ -44,13 +47,17 @@ scripts/
   run_phase0.py  # 阶段 A 入口：跑全部实验并生成验收报告
   run_phaseB.py  # 阶段 B 入口：顺序学习 + 组合泛化 + Pareto 回归验收
   run_phaseC.py  # 阶段 C 入口：结构稀疏核心双臂 + 能耗/结构/量化验收
+  run_e1.py      # 阶段 E1 入口：字节词元质检 + assoc/xorsum 长程信用分配 + 验收
+  run_e2.py      # 阶段 E2 入口：锚点网格 + 1/2/4M 梯子 + BPTT 孪生 + iPC 消融 + 验收报告
 docs/
-  SRPC_DESIGN.md  # 设计文档 v1.7（§7.5 阶段 A 六项验收 / §8.5 信用分配早筛 / §8 里程碑 / §9 开放问题）
+  SRPC_DESIGN.md  # 设计文档 v1.9（§7.5 阶段 A 六项验收 / §8.5 信用分配早筛 / §8 里程碑 / §9 开放问题）
   ROADMAP.md      # 后续路线图（E 语言化 / F 知识+持续学习 / G 推理规划 / D 意识向）
   GPU_TASKS.md    # GPU 依赖任务清单（沙箱外执行）
 results/          # 阶段 A：自动生成的图表 / metrics.json / report.md
 results_phaseB/   # 阶段 B：同上
 results_phaseC/   # 阶段 C：同上
+results_e1/       # 阶段 E1：词元质检 + 长程信用分配验收
+results_e2/       # 阶段 E2：锚点网格 / 梯子 / 孪生 / iPC / 验收报告
 ```
 
 ## 快速开始
@@ -112,6 +119,15 @@ python scripts/run_phaseC.py --steps 200  # 冒烟测试
 | C4 int8 部署就绪 | PASS | 量化后冻结误差 0.099 vs fp 0.098；组合 0.103 vs 0.100（无回撤） |
 
 补充：结构口径（架构内在能耗主度量）稀疏核心比稠密对照臂**节省 74%**；与自身稠密等价比节省 89%。事件口径臂间对比不可直接比（稠密臂内部层事件静默、信息流微弱，稀疏核心 k-WTA 保证内部层真实活跃 12–38%）——详见 [results_phaseC/report.md](results_phaseC/report.md) 的口径解读。
+
+## 阶段 E（语言化）进度
+
+> 单一原理在同一套局部规则（误差驱动 PCN）内长出语言能力，缩放曲线对标自训 BPTT 孪生。E0（记忆价值重定性）已收口，E1/E2 见下，E3/F/G 详见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+
+| 子阶段 | 状态 | 关键证据 |
+|---|---|---|
+| E1 词元前端 + 长程信用分配 | ✅ 收口（5/5 PASS） | ByteTokenizer（字节级 UTF-8，256 维一热，7 组多语/emoji/控制字符往返质检全过）；assoc 延迟文本关联主验收 acc 0.995 / gap 0.818 / Δ=8 外推 0.985（3 seeds）；xorsum 在线不可达归因 parity SQ-hard（BP 在线同样失败，batch 可解），修复排 F1 记忆回放。见 [results_e1/report.md](results_e1/report.md) |
+| E2 缩放梯子 + 孪生对照 | ✅ pilot 收口（判据 2/3/4 PASS，判据 1 转 GPU） | µPC 参数化零调参迁移（锚点 iters=12 / eta_w=0.01，BPC 4.529 下穿 unigram 4.797）+ 独立线性读出头（W_out+bias 承载 unigram 先验）+ iPC 增量调度采纳；梯子 1/2/4M BPC 4.256/4.213/4.238，BP 孪生 3.500/3.464/3.530，PCN:孪生恒 1.20–1.22×；判据 1 单调性 pilot 与孪生同步回退 → 数据量瓶颈定性，8M/15M 登顶裁决转 [docs/GPU_TASKS.md](docs/GPU_TASKS.md) T1/T2。见 [results_e2/report.md](results_e2/report.md) |
 
 ## A/B 实验设计
 
