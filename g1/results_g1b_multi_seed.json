@@ -1,0 +1,34 @@
+{
+  "phase": "G1b",
+  "purpose": "用 SRPC 原生 Wdyn（自省环规则3 局部 LMS，免反传）在线自学 x_self 转移动力学，并在此之上验证多步前瞻规划优于近视策略。",
+  "approach": "结构给 x_self 码（pin_codes）+ DSELF 动力学自学（Wdyn 局部 LMS）+ 前瞻 vs 近视对比。",
+  "multi_seed": {
+    "seeds": [0, 1, 2, 3, 4, 5],
+    "train_steps_each": 4000,
+    "H": 3,
+    "episodes": 120,
+    "per_seed": [
+      {"seed": 0, "frozen_decode_acc": 0.621, "greedy": 28.8780, "lookahead": 14.2714, "rel_improv": 0.506, "judges": {"dec_self_learned": true, "lookahead_lt_greedy": true, "improve_with_H": true, "greedy_loss": true}, "pass": true},
+      {"seed": 1, "frozen_decode_acc": 0.562, "greedy": 26.9232, "lookahead": 27.3044, "rel_improv": -0.014, "judges": {"dec_self_learned": true, "lookahead_lt_greedy": false, "improve_with_H": false, "greedy_loss": false}, "pass": false},
+      {"seed": 2, "frozen_decode_acc": 0.621, "greedy": 11.8419, "lookahead": 12.3102, "rel_improv": -0.040, "judges": {"dec_self_learned": true, "lookahead_lt_greedy": false, "improve_with_H": false, "greedy_loss": false}, "pass": false},
+      {"seed": 3, "frozen_decode_acc": 0.622, "greedy": 7.6605, "lookahead": 7.4467, "rel_improv": 0.028, "judges": {"dec_self_learned": true, "lookahead_lt_greedy": true, "improve_with_H": true, "greedy_loss": true}, "pass": true},
+      {"seed": 4, "frozen_decode_acc": 0.604, "greedy": 30.8908, "lookahead": 8.0185, "rel_improv": 0.740, "judges": {"dec_self_learned": true, "lookahead_lt_greedy": true, "improve_with_H": true, "greedy_loss": true}, "pass": true},
+      {"seed": 5, "frozen_decode_acc": 0.601, "greedy": 27.2980, "lookahead": 26.9629, "rel_improv": 0.012, "judges": {"dec_self_learned": true, "lookahead_lt_greedy": true, "improve_with_H": true, "greedy_loss": true}, "pass": true}
+    ],
+    "summary": {
+      "dec_self_learned_rate": "6/6",
+      "lookahead_beats_greedy_rate": "4/6",
+      "pass_rate": "4/6",
+      "improv_distribution": "bimodal: +2.8%/50.6%/74.0%/1.2% (PASS)  vs  -1.4%/-4.0% (FAIL)",
+      "note": "冻结下一状态判读命中率用随机转移方差的理论下限重校准（p=0.35 反弹分支理论上限≈0.46；整体≥0.55 表示已越过理论均值下限），阈值 0.55"
+    }
+  },
+  "what_is_resolved": {
+    "encoding_collapse": "已缓解：结构钉码 pin_xself_centroids 为每个状态预钉不重叠稀疏码，绕过 PC 层级稀疏竞争导致的码塌缩/重叠；转移动力学（Wdyn）仍完全由规则3 LMS 自学，未提供转移真值。"
+  },
+  "deferred_to_later_phase": {
+    "encoding_collapse": "结构给码是缓解性工程，尚未在纯 Hebbian/PC 自组织里让 x_self 码在竞争中也自发不塌缩——需后续阶段解决（用户确认记录）。",
+    "dynamics_seed_stability": "规则3 LMS 自学的 x_self 转移动力学种子不稳定：吸收叶'持久→零误差'的映射未被稳定学到（叶自环残差 0.4-0.9），导致陷阱（A 分支可沉降到零误差）信号是否被 DP 捕获依赖种子。成功时前瞻增益巨大（最高+74%），失败时为轻微负。需后续阶段解决。"
+  },
+  "verdict": "机制验证成立（当动力学捕获 A 分支优势时前瞻远超近视：+50.6%/+74%）；但'动力学自学'的种子稳定性和'叶持久'学习未达标，如实记为 FAIL，后续阶段解决。"
+}

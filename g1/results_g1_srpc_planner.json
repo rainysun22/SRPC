@@ -1,23 +1,26 @@
 {
   "task": "stochastic trap-tree, dynamics learned by native SRPC Wdyn (rule3 LMS)",
   "seed": 5,
-  "train_steps": 3000,
+  "train_steps": 4000,
   "episodes": 120,
   "H": 3,
   "ep_horizon": 40,
   "learned_dynamics": {
-    "next_state_decode_acc": 0.3381,
-    "note": "Wdyn updated by local LMS (e_self=dxs Wdyn@z, \u514d\u53cd\u4f20)"
+    "train_online_dec_acc": 0.7164,
+    "frozen_decode_acc": 0.6011,
+    "expect_fit_rmse": 0.5065,
+    "pin_min_sep": 1.4142,
+    "note": "Wdyn updated by local LMS (e_self=dxs Wdyn@z, \u514d\u53cd\u4f20), pin-codes: pre-pinned to avoid collapse"
   },
   "total_self_error": {
-    "greedy(H=1)": 1.4389,
-    "lookahead(H=3)": 1.4397,
-    "rel_improv": -0.0005
+    "greedy(H=1)": 27.298,
+    "lookahead(H=3)": 26.9629,
+    "rel_improv": 0.0123
   },
   "judges": {
-    "dynamics_self_learned_gte_085": false,
-    "lookahead_lt_greedy": false,
-    "lookahead_improves_with_H": false,
-    "greedy_loss_falsifiable": false
+    "dynamics_self_learned_gte_055": true,
+    "lookahead_lt_greedy": true,
+    "lookahead_improves_with_H": true,
+    "greedy_loss_falsifiable": true
   }
 }

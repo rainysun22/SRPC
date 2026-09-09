@@ -85,6 +85,9 @@ class SRPCModel:
         self.ema_self = 1e-3                    # ||e_self|| 基线
         self.U_action = np.ones(max(n_actions, 1))
         self.n_action = np.zeros(max(n_actions, 1), dtype=int)
+        # 结构钉码（"结构给 x_self 码"）：给状态索引钉死不重叠的 x_self 码，
+        # 绕过 PC 层级稀疏竞争导致的编码塌缩。规则 3 的 Wdyn（局部 LMS）仍在学习转移。
+        self.pin_codes: dict[int, np.ndarray] = {}
 
     # ------------------------------------------------------------------
     # 结构性稀疏（不变量 3：出生即定型掩码，学习只改已有突触）
@@ -128,7 +131,7 @@ class SRPCModel:
     # ------------------------------------------------------------------
     # 一步在线处理：局部推断 -> 误差 -> 自省 -> 局部学习
     # ------------------------------------------------------------------
-    def observe(self, s: np.ndarray) -> dict:
+    def observe(self, s: np.ndarray, state_id: int | None = None) -> dict:
         cfg = self.cfg
 
         # ---------- 规则 1：局部推断（事件驱动稀疏更新） ----------
@@ -158,6 +161,12 @@ class SRPCModel:
                 self.xs = _kwta(self.xs, cfg.kwta_frac)
 
             ev1, ev2, evs = m1.mean(), m2.mean(), ms.mean()
+
+        # 结构钉码（"结构给 x_self 码"）：若当前状态有钉死码，PC 收敛后直接覆盖 xs。
+        # 之后规则 3（e_self=xs−pred_self → Wdyn 局部 LMS）与规则 2 的 Hebbian 都基于该码运行，
+        # 从而绕过 PC 稀疏竞争导致的编码塌缩，同时保持动力学转移完全由规则 3 自学。
+        if state_id is not None and state_id in self.pin_codes:
+            self.xs = self.pin_codes[state_id].copy()
 
         # 收敛后的误差
         e0 = s - self.W10 @ self.x1
