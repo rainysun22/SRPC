@@ -89,7 +89,8 @@ class LMPCN:
     """E2 主网络。h = h1 = h2（梯子宽度），µPC 前乘子/步长锚定 h_ref。"""
 
     def __init__(self, cfg: E2Config, h: int, rng: np.random.Generator,
-                 eta_w: float | None = None, iters: int | None = None):
+                 eta_w: float | None = None, iters: int | None = None,
+                 mu_pc_exp: float = 0.5):
         self.cfg = cfg
         self.h = h
         self.W, self.C = cfg.context, 256
@@ -103,8 +104,8 @@ class LMPCN:
         self.et1 = cfg.eta_inf * (h / cfg.h_ref) ** 0.5   # x1 活动步长补偿
         self.et2 = cfg.eta_inf
         self.eta_w1 = ew                              # ||e0|| 由 s1 稳住 → 恒定
-        self.eta_w2 = ew * (cfg.h_ref / h) ** 0.5     # ||e1|| ∝ √h
-        self.eta_w3 = ew * (cfg.h_ref / h) ** 0.5     # ||e2|| ∝ √h
+        self.eta_w2 = ew * (cfg.h_ref / h) ** mu_pc_exp     # ||e1|| ∝ √h
+        self.eta_w3 = ew * (cfg.h_ref / h) ** mu_pc_exp     # ||e2|| ∝ √h
         # ---- W1 块紧凑 (W, r·256, per)：每单元感受野 = 相邻 r 块 ----
         w1 = rng.normal(0.0, 1.0, (self.W, self.r * 256, self.per)
                         ).astype(np.float32)

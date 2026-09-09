@@ -66,13 +66,14 @@ class LMPCNg:
 
     def __init__(self, cfg: E2Config, h: int, rng: np.random.Generator,
                  eta_w: float | None = None, iters: int | None = None,
-                 device: str = "cuda"):
+                 device: str = "cuda", mu_pc_exp: float = 0.5):
         self.cfg = cfg
         self.h = h
         self.W, self.C = cfg.context, 256
         self.device = torch.device(device)
         # ---- 权重真源：numpy 版同构造（同 rng 种子 -> 初始完全一致）----
-        src = _LMPCN_np(cfg, h, rng, eta_w=eta_w, iters=iters)
+        src = _LMPCN_np(cfg, h, rng, eta_w=eta_w, iters=iters,
+                        mu_pc_exp=mu_pc_exp)
         to = lambda a: torch.from_numpy(np.ascontiguousarray(a)).to(self.device)
         self.per = src.per
         self.r = src.r

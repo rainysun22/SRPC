@@ -37,10 +37,11 @@ class LMPCNgG(LMPCNg):
 
     def __init__(self, cfg: E2Config, h: int, rng: np.random.Generator,
                  eta_w: float | None = None, iters: int | None = None,
-                 device: str = "cuda"):
+                 device: str = "cuda", mu_pc_exp: float = 0.5):
         if device == "cpu" or not torch.cuda.is_available():
             raise ValueError("LMPCNgG 仅支持 CUDA")
-        super().__init__(cfg, h, rng, eta_w=eta_w, iters=iters, device=device)
+        super().__init__(cfg, h, rng, eta_w=eta_w, iters=iters, device=device,
+                         mu_pc_exp=mu_pc_exp)
         assert not cfg.kwta_every_iter, "图版未实现逐迭代 k-WTA 分支"
         self._graph: torch.cuda.CUDAGraph | None = None
         self._graph_ready = False

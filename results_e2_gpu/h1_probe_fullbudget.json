@@ -1,0 +1,58 @@
+{
+ "probe_n": 12000,
+ "ridge_lambda": 0.001,
+ "rows": [
+  {
+   "h": 768,
+   "step": 1039838,
+   "w2_smax": 3.18,
+   "probe_acc": 0.28,
+   "probe_bpc": 7.763,
+   "twin_acc": 0.4833,
+   "ratio": 0.579,
+   "wall": 81.9
+  },
+  {
+   "h": 1200,
+   "step": 1039838,
+   "w2_smax": 3.73,
+   "probe_acc": 0.28,
+   "probe_bpc": 7.752,
+   "twin_acc": 0.4817,
+   "ratio": 0.581,
+   "wall": 83.5
+  },
+  {
+   "h": 1856,
+   "step": 1039838,
+   "w2_smax": 5.03,
+   "probe_acc": 0.275,
+   "probe_bpc": 7.747,
+   "twin_acc": 0.4917,
+   "ratio": 0.559,
+   "wall": 85.0
+  },
+  {
+   "h": 2832,
+   "step": 1039838,
+   "w2_smax": 5.18,
+   "probe_acc": 0.2567,
+   "probe_bpc": 7.741,
+   "twin_acc": null,
+   "ratio": null,
+   "wall": 90.1
+  },
+  {
+   "h": 4032,
+   "step": 1039838,
+   "w2_smax": 5.27,
+   "probe_acc": 0.2383,
+   "probe_bpc": 7.732,
+   "twin_acc": null,
+   "ratio": null,
+   "wall": 100.0
+  }
+ ],
+ "probe_acc_monotonic": false,
+ "note": "freeze \u6743\u91cd \u2192 \u81ea\u7531\u63a8\u65ad x2 \u2192 \u5cad\u56de\u5f52\u7ebf\u6027\u63a2\u9488 next-byte\uff1bratio=Pprobe_acc/twin_acc\uff1b\u22651856 \u6863\u7528 E2 \u4fee\u590d\u7248(W2 \u8c31\u622a\u65ad\u540e) checkpoint\uff0cw2_smax \u8bb0\u8d26\u8c31\u5065\u5eb7"
+}

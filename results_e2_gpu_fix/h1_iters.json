@@ -1,0 +1,96 @@
+{
+ "hs": [
+  1856,
+  2832,
+  4032
+ ],
+ "iters": [
+  12,
+  24,
+  48
+ ],
+ "rows": [
+  {
+   "h": 1856,
+   "step": 1039838,
+   "iters": 12,
+   "own_acc": 0.285,
+   "own_bpc": 6.498,
+   "probe_acc": 0.2383,
+   "wall": 38.7
+  },
+  {
+   "h": 1856,
+   "step": 1039838,
+   "iters": 24,
+   "own_acc": 0.2367,
+   "own_bpc": 6.394,
+   "probe_acc": 0.2267,
+   "wall": 72.4
+  },
+  {
+   "h": 1856,
+   "step": 1039838,
+   "iters": 48,
+   "own_acc": 0.1833,
+   "own_bpc": 6.34,
+   "probe_acc": 0.2383,
+   "wall": 140.2
+  },
+  {
+   "h": 2832,
+   "step": 1039838,
+   "iters": 12,
+   "own_acc": 0.25,
+   "own_bpc": 6.39,
+   "probe_acc": 0.215,
+   "wall": 40.5
+  },
+  {
+   "h": 2832,
+   "step": 1039838,
+   "iters": 24,
+   "own_acc": 0.17,
+   "own_bpc": 6.106,
+   "probe_acc": 0.165,
+   "wall": 75.7
+  },
+  {
+   "h": 2832,
+   "step": 1039838,
+   "iters": 48,
+   "own_acc": 0.07,
+   "own_bpc": 6.962,
+   "probe_acc": 0.135,
+   "wall": 145.2
+  },
+  {
+   "h": 4032,
+   "step": 1039838,
+   "iters": 12,
+   "own_acc": 0.2233,
+   "own_bpc": 6.325,
+   "probe_acc": 0.1667,
+   "wall": 47.2
+  },
+  {
+   "h": 4032,
+   "step": 1039838,
+   "iters": 24,
+   "own_acc": 0.0917,
+   "own_bpc": 6.005,
+   "probe_acc": 0.1233,
+   "wall": 80.0
+  },
+  {
+   "h": 4032,
+   "step": 1039838,
+   "iters": 48,
+   "own_acc": 0.03,
+   "own_bpc": 17.27,
+   "probe_acc": 0.085,
+   "wall": 147.2
+  }
+ ],
+ "note": "\u56fa\u5b9a\u6743\u91cd\u6df1\u63a8\u65ad iters \u6d88\u878d"
+}
