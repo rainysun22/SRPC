@@ -1,7 +1,7 @@
 {
   "phase": "G4",
-  "encoding": "selforg (block RF + alpha=0.1/beta=0.5), no pin",
-  "purpose": "无预钉下 x_self 码自发可区分 + 规则3 LMS 动力学种子稳定 → 6/6 前瞻>近视",
+  "encoding": "selforg (block RF + alpha=0.05/beta=0.5) + 两阶段(systematic v,a sweep) + 动作块掩码(per-action Wdyn), no pin",
+  "purpose": "无预钉下 x_self 码自发可区分 + 规则3 LMS 动力学种子稳定（动作块独立转移矩阵）→ 6/6 前瞻>近视",
   "per_seed": [
     {
       "seed": 0,
@@ -10,14 +10,14 @@
       "H": 6,
       "ep_horizon": 40,
       "selforg_code": {
-        "state_sep_min": 0.2922,
+        "state_sep_min": 0.2914,
         "zero_states": 0,
-        "expect_fit_rmse": 0.2011
+        "expect_fit_rmse": 0.1981
       },
       "frozen_decode_acc": 0.7739,
-      "greedy": 9.1584,
-      "lookahead": 3.3071,
-      "rel_improv": 0.6389,
+      "greedy": 8.9107,
+      "lookahead": 1.5131,
+      "rel_improv": 0.8302,
       "judges": {
         "dec_self_learned": true,
         "lookahead_lt_greedy": true,
@@ -33,14 +33,14 @@
       "H": 6,
       "ep_horizon": 40,
       "selforg_code": {
-        "state_sep_min": 0.3683,
+        "state_sep_min": 0.3104,
         "zero_states": 0,
-        "expect_fit_rmse": 0.205
+        "expect_fit_rmse": 0.18
       },
-      "frozen_decode_acc": 0.7525,
-      "greedy": 8.2769,
-      "lookahead": 3.7816,
-      "rel_improv": 0.5431,
+      "frozen_decode_acc": 0.7911,
+      "greedy": 7.3245,
+      "lookahead": 1.4834,
+      "rel_improv": 0.7975,
       "judges": {
         "dec_self_learned": true,
         "lookahead_lt_greedy": true,
@@ -56,21 +56,21 @@
       "H": 6,
       "ep_horizon": 40,
       "selforg_code": {
-        "state_sep_min": 0.2964,
+        "state_sep_min": 0.301,
         "zero_states": 0,
-        "expect_fit_rmse": 0.262
+        "expect_fit_rmse": 0.2041
       },
-      "frozen_decode_acc": 0.6829,
-      "greedy": 3.0209,
-      "lookahead": 3.2521,
-      "rel_improv": -0.0765,
+      "frozen_decode_acc": 0.7911,
+      "greedy": 8.9024,
+      "lookahead": 1.7066,
+      "rel_improv": 0.8083,
       "judges": {
         "dec_self_learned": true,
-        "lookahead_lt_greedy": false,
-        "improve_with_H": false,
-        "greedy_loss": false
+        "lookahead_lt_greedy": true,
+        "improve_with_H": true,
+        "greedy_loss": true
       },
-      "pass": false
+      "pass": true
     },
     {
       "seed": 3,
@@ -79,14 +79,14 @@
       "H": 6,
       "ep_horizon": 40,
       "selforg_code": {
-        "state_sep_min": 0.2404,
+        "state_sep_min": 0.2447,
         "zero_states": 0,
-        "expect_fit_rmse": 0.2115
+        "expect_fit_rmse": 0.1741
       },
-      "frozen_decode_acc": 0.7257,
-      "greedy": 8.2559,
-      "lookahead": 3.4629,
-      "rel_improv": 0.5806,
+      "frozen_decode_acc": 0.7911,
+      "greedy": 7.5973,
+      "lookahead": 1.4466,
+      "rel_improv": 0.8096,
       "judges": {
         "dec_self_learned": true,
         "lookahead_lt_greedy": true,
@@ -102,14 +102,14 @@
       "H": 6,
       "ep_horizon": 40,
       "selforg_code": {
-        "state_sep_min": 0.2316,
+        "state_sep_min": 0.2356,
         "zero_states": 0,
-        "expect_fit_rmse": 0.2212
+        "expect_fit_rmse": 0.1807
       },
-      "frozen_decode_acc": 0.6861,
-      "greedy": 8.5314,
-      "lookahead": 3.1919,
-      "rel_improv": 0.6259,
+      "frozen_decode_acc": 0.7911,
+      "greedy": 7.7455,
+      "lookahead": 1.4062,
+      "rel_improv": 0.8184,
       "judges": {
         "dec_self_learned": true,
         "lookahead_lt_greedy": true,
@@ -125,14 +125,14 @@
       "H": 6,
       "ep_horizon": 40,
       "selforg_code": {
-        "state_sep_min": 0.2221,
+        "state_sep_min": 0.2347,
         "zero_states": 0,
-        "expect_fit_rmse": 0.1915
+        "expect_fit_rmse": 0.1788
       },
-      "frozen_decode_acc": 0.7138,
-      "greedy": 8.5507,
-      "lookahead": 3.9263,
-      "rel_improv": 0.5408,
+      "frozen_decode_acc": 0.7736,
+      "greedy": 7.5872,
+      "lookahead": 1.5724,
+      "rel_improv": 0.7928,
       "judges": {
         "dec_self_learned": true,
         "lookahead_lt_greedy": true,
@@ -143,7 +143,7 @@
     }
   ],
   "summary": {
-    "pass_rate": "5/6",
-    "mean_rel_improv": 0.4755
+    "pass_rate": "6/6",
+    "mean_rel_improv": 0.8095
   }
 }

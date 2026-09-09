@@ -68,12 +68,26 @@ class SRPCModel:
         # 阶段2 冻结编码、集中让 Wdyn(LMS) 在静态码上按动作收敛。避免两套目标
         # （漂移码 + 动作条件化）在同一步相互干扰（这是 v0a1/v1a1 动作分离失败根因）。
         self.learn_dynamics = True
+        # G4：归一化 LMS（自适应滤波标准加固）——增量按输入范数归一，使 epoch 更新
+        # 对输入尺度不变。last_z=[xs(v), a_onehot]，one-hot(=1.0) 远大于 xs(root)(~0.18)，
+        # 未归一时大输入列垄断更新、root 小码列欠更新 → 动作条件化种子脆弱。
+        # 归一化后各列按方向一致更新，消除尺度病态（inflate: normalize ||xs||=1 更彻底）。
+        self.lms_norm = bool(getattr(cfg, "lms_norm", False))
+        self.lms_xs_only = bool(getattr(cfg, "lms_xs_only", False))
+        # G4：动作块掩码（动作条件化转移的标准做法）——把动作编码为 per-action 的 xs 副本：
+        # 消除了单一共享矩阵 pred=S@xs+A_a 的受限仿射容量（A_a/S 跨动作状态共享 → 目标码
+        # 无法普适到达，a1→B 入口是否学会纯靠种子运气）。块编码下各动作互不干扰、且输入与
+        # 目标同尺度（无 one-hot 大值垄断更新）。
+        self.dyn_action_block = bool(getattr(cfg, "dyn_action_block", False))
 
         # 生成权重（非负部件字典；Wdyn 为有符号动力学模型）
         self.W10 = _colnorm(rng.uniform(0.5, 1.0, (cfg.d_obs, cfg.n_l1)))
         self.W21 = _colnorm(rng.uniform(0.5, 1.0, (cfg.n_l1, cfg.n_l2)))
         self.Ws2 = _colnorm(rng.uniform(0.5, 1.0, (cfg.n_l2, cfg.n_self)))
         nz = cfg.n_self + max(n_actions, 0)
+        if self.dyn_action_block:
+            # 动作块编码：z 长 na*nself，每动作各有独立的 nself×nself 转移矩阵
+            nz = cfg.n_self * max(n_actions, 1)
         self.Wdyn = rng.normal(0.0, 0.05, (cfg.n_self, nz))
         # 结构性稀疏掩码（不变量 3：出生即定型，学习只更新已有突触）
         self.mask10 = self.mask21 = self.mask2s = self.mask_dyn = None
@@ -205,7 +219,13 @@ class SRPCModel:
             if self.learning and self.learn_dynamics and self.last_z is not None:
                 gate = self.last_z > cfg.theta_syn
                 self.Wdyn *= (1.0 - cfg.dyn_decay)
-                self.Wdyn += cfg.eta_dyn * np.outer(e_self, self.last_z * gate)
+                u = np.outer(e_self, self.last_z * gate)
+                # 归一化 LMS：除 ||last_z||²（自适应滤波标准加固），
+                # 使权值增量对输入尺度不变（消除 one-hot 大列对更新的尺度垄断）。
+                if self.lms_norm:
+                    denom = float(np.dot(self.last_z, self.last_z))
+                    u = u / (denom + 1e-8)
+                self.Wdyn += cfg.eta_dyn * u
                 if self.mask_dyn is not None:
                     self.Wdyn *= self.mask_dyn     # 结构由构造保证
 
@@ -272,7 +292,12 @@ class SRPCModel:
     # ------------------------------------------------------------------
     def prepare_next(self, action: int | None) -> None:
         cfg = self.cfg
-        if self.na > 0 and action is not None:
+        if self.dyn_action_block and self.na > 0 and action is not None:
+            # 动作块编码：把 xs 放进第 action 个块，其余块置零 →
+            # Wdyn[:, a块] 即为该动作独立的 x_self 转移矩阵。
+            z = np.zeros(cfg.n_self * self.na)
+            z[action * cfg.n_self:(action + 1) * cfg.n_self] = self.xs
+        elif self.na > 0 and action is not None:
             oh = np.zeros(self.na)
             oh[action] = 1.0
             z = np.concatenate([self.xs, oh])

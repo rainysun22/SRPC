@@ -6,6 +6,10 @@
         码在纯 Hebbian/竞争(kWTA) 自组织里自发可区分 → 彻底去掉 pin_codes。
   G4-② 动力学种子稳定：让吸收叶"持久→零误差"映射被稳定学到（叶自环残差→0），
         使陷阱信号对 DP 稳健（目标是 6/6 seed 前瞻>近视）。
+        关键机制：**动作块掩码（per-action Wdyn）**。默认 last_z=[xs,a_onehot] 让所有
+        动作共享同一个线性映射 pred=S@xs+A_a（S/A 跨动作状态共享 → 受限仿射容量，目标码
+        靠种子运气才能到达 → seed2 陷阱反转 fail）。改成把 xs 放入第 a 个动作块
+        z=[0.., xs_a块, ..]，Wdyn[:,a块] 即该动作独立转移矩阵 → 动作条件化鲁棒，6/6 pass。
 
 与 G1b 唯一差异 = 编码方式（自组织 vs 结构钉码）+ 推断权重。规划、动力学学习、
 判据完全一致（都是规则3 局部 LMS 自学 Wdyn + 前瞻 H DP 对照近视）。
@@ -62,7 +66,8 @@ def make_selforg_model(seed: int, n_l1: int = 60, nself: int = 64,
                        win_frac: float = 0.15, kwta: float = 0.33,
                        fdyn: float = 0.5, alpha: float = 0.05,
                        beta: float = 0.50, eta_dyn: float = 0.80,
-                       dyn_decay: float = 1e-5) -> tuple[SRPCModel, int]:
+                       dyn_decay: float = 1e-5, lms_norm: bool = False,
+                       dyn_block: bool = False) -> tuple[SRPCModel, int]:
     """构建无 pin 的自组织编码 SRPCModel（block RF + 推断权重平衡）。
 
     nself/n_l1 放大 + win_frac 收窄：拉开枢纽状态(尤其 root/A-in)的码距，
@@ -75,6 +80,10 @@ def make_selforg_model(seed: int, n_l1: int = 60, nself: int = 64,
                       theta_event=0.01, fan_in_dyn_frac=fdyn,
                       alpha=alpha, beta=beta, eta_dyn=eta_dyn,
                       dyn_decay=dyn_decay)
+    if lms_norm:
+        setattr(cfg, "lms_norm", True)
+    if dyn_block:
+        setattr(cfg, "dyn_action_block", True)
     setattr(cfg, "recep_win_frac", win_frac)
     model = SRPCModel(cfg, n_actions=2,
                       rng=np.random.default_rng(seed + 1), self_loop=True)
@@ -289,14 +298,14 @@ def main() -> int:
     args = ap.parse_args()
 
     seeds = list(range(6)) if args.all_seeds else [args.seed if args.seed is not None else 0]
-    out = {"phase": "G4", "encoding": "selforg (block RF + alpha=0.05/beta=0.5) + 两阶段(systematic v,a sweep), no pin",
-           "purpose": "无预钉下 x_self 码自发可区分 + 规则3 LMS 动力学种子稳定 → 6/6 前瞻>近视",
+    out = {"phase": "G4", "encoding": "selforg (block RF + alpha=0.05/beta=0.5) + 两阶段(systematic v,a sweep) + 动作块掩码(per-action Wdyn), no pin",
+           "purpose": "无预钉下 x_self 码自发可区分 + 规则3 LMS 动力学种子稳定（动作块独立转移矩阵）→ 6/6 前瞻>近视",
            "per_seed": []}
     for sd in seeds:
         t0 = time.time()
         rng = np.random.default_rng(sd)
         task = TrapTree(rng=rng)
-        model, d_obs = make_selforg_model(sd)
+        model, d_obs = make_selforg_model(sd, dyn_block=True)
         patterns = encode_state_patterns(task, rng, d_obs)
         train_selforg(model, task, patterns, args.train_steps, rng)
         dec = eval_decode_frozen_selforg(model, task, patterns)
