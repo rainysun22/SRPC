@@ -51,28 +51,31 @@ from srpc.model import SRPCModel
 # ----------------------------------------------------------------------------
 @dataclass
 class TrapTree:
-    """二叉决策树，内部节点转移带回弹概率。
+    """含"近视陷阱"的随机转移俘。陷阱建在**自误差（=转移的可预测方差）**层。
 
-    状态 id：root=0；left-child 子树入口 A=1；right-child 子树入口 B=2；
-    A 的两个叶子 =3,4；B 的两个叶子 =5,6。
-    手搭陷阱：root 上走 action R→B 的边 p=0.9（一步清理，greedy 会被骗进 B），
-    但 B 内部两叶子边都 p=0.5（长期噪声大）；走 action L→A 的边 p=0.5（一步
-    稍噪），但 A 内部两叶子边都 p=0.9（长期干净）。
+    自误差语义：`最终自误差(v,a) = || pred_self(v,a) − xs(实际下一状态) ||`，
+    越低 = 该转移越可预测。min 自误差 → 系统倾向待在可预测区。
+
+    手搭陷阱：root 上 act1→B 的边 p=0.9（**一步方差小**，greedy 会被骗进 B），
+    但 B 是"噪声井"：内部 4/5/6 三态 p=0.5 来回弹跳、永不沉降 -> 每步自误差都高；
+    走 act0→A 的边 p=0.6（一步方差稍大），但 A 内部 p=0.85 且叶子吸收
+    可预测 -> 沉降后半误差≈0。近视只看 1 步 -> 被"一步干净"骗进 B（持续高误差）；
+    前瞻 H≥2 累加未来 -> 看穿 A 更省、B 是坑。
     """
     depth_small: bool = True
     rng: np.random.Generator = field(default_factory=lambda: np.random.default_rng(0))
 
     def __post_init__(self):
-        # 节点数：root + 2 内部 + 4 叶子 = 7
+        # 状态：0=root, 1=A内部(静区), 2/3=A叶子(吸收), 4=B内部(噪声井), 5/6=B噪声态
         self.n_states = 7
         self.is_leaf = np.zeros(self.n_states, dtype=bool)
-        self.is_leaf[[3, 4, 5, 6]] = True
-        # child(v, a)：0->左(1, action0)/右(2, action1)；1->(3,4)；2->(5,6)
-        self.child = {0: (1, 2), 1: (3, 4), 2: (5, 6), 3: (3, 3), 4: (4, 4),
-                      5: (5, 5), 6: (6, 6)}
-        # p[v][a]：到达 child 的概率（否则回弹停在 v）
-        self.p = {0: (0.5, 0.9), 1: (0.9, 0.9), 2: (0.5, 0.5),
-                  3: (1.0, 1.0), 4: (1.0, 1.0), 5: (1.0, 1.0), 6: (1.0, 1.0)}
+        self.is_leaf[[2, 3]] = True
+        self.child = {0: (1, 4), 1: (2, 3), 2: (2, 2), 3: (3, 3),
+                      4: (5, 6), 5: (4, 6), 6: (4, 5)}
+        # p[v][a]：到达 child 的概率（否则回弹停在 v）；叶子吸收 p=1
+        self.p = {0: (0.40, 0.90), 1: (0.85, 0.85),
+                  2: (1.0, 1.0), 3: (1.0, 1.0),
+                  4: (0.35, 0.35), 5: (0.35, 0.35), 6: (0.35, 0.35)}
 
     def step(self, v: int, a: int, rng: np.random.Generator) -> int:
         child = self.child[v][a]
@@ -115,8 +118,8 @@ def train_wdyn(model: SRPCModel, task: TrapTree, patterns: list[np.ndarray],
         nxt = task.step(v, a, rng)
         # 解码判读：把 pred_self 判读为最近状态质心
         if cnt.sum() > 0:
-            pred_vec = model.pred_self.reshape(1, -1)
-            dist = np.linalg.norm(accum / cnt[:, None] - pred_vec, axis=1)
+            centroids_now = accum / np.maximum(cnt[:, None], 1e-9)
+            dist = np.linalg.norm(centroids_now - model.pred_self.reshape(1, -1), axis=1)
             guess = int(np.argmin(dist))
             # 真实下一状态的目标模式
             hits += int(guess == nxt)
@@ -127,34 +130,7 @@ def train_wdyn(model: SRPCModel, task: TrapTree, patterns: list[np.ndarray],
     dec_acc = hits / max(n_steps - 1, 1)
     centroids = accum / np.maximum(cnt[:, None], 1e-9)
     _reset(model)
-    return model, centroids, {"dec_acc": dec_acc, "Err": Err, "P": P}
-    # 用冻结模型测每 (v,a) 的预测自误差 与 到达子节点的经验概率
-    Err = np.zeros((task.n_states, 2))
-    P = np.zeros((task.n_states, 2))
-    model.set_learning(False)
-    n_meas = 300
-    _reset(model)
-    v = 0
-    for _ in range(n_meas):
-        model.observe(patterns[v])
-        for a in (0, 1):
-            model.prepare_next(a)
-            err = float(np.linalg.norm(model.xs - model.pred_self))
-        # 用随机动作估计经验转移
-        a = int(rng.integers(2))
-        xsa_before = model.xs.copy()
-        model.prepare_next(a)
-        pred = model.pred_self.copy()
-        nxt = task.step(v, a, rng)
-        Err[v][a] += float(np.linalg.norm(model.xs.astype(float) - pred))
-        if nxt == task.child[v][a] and not task.is_leaf[v]:
-            P[v][a] += 1.0
-        v = nxt
-    # 只在内部节点把 Err 变成 平均（除以访问），P 变成概率
-    Err = Err / (n_meas / 2.0 + 1e-9)
-    P = P / (n_meas / 8.0 + 1e-9)
-    model.set_learning(True)
-    return centroids, {"dec_acc": dec_acc, "Err": Err, "P": P}
+    return centroids, {"dec_acc": dec_acc}
 
 
 # ----------------------------------------------------------------------------
@@ -162,11 +138,11 @@ def train_wdyn(model: SRPCModel, task: TrapTree, patterns: list[np.ndarray],
 # ----------------------------------------------------------------------------
 def run_policy(model: SRPCModel, task: TrapTree, patterns, centroids,
                policy: str, H: int, eps_steps: int, rng) -> np.ndarray:
-    """从一个随机构造的真实布局跑 eps_steps，返回每步累计自误差。
+    """跑 eps_steps，返回每步的**真实转移自误差** = || pred(v,a) − xs(实际next) ||。
     policy∈{'greedy','lookahead'}；H 为前瞻深度（lookahead 用，greedy 忽略）。"""
     Err, P = _learned_params(model, task, patterns, centroids)
     model.set_learning(False)
-    # 准备值函数（lookahead）——预计算 J(v, 0..H)
+    # 预计算 lookahead 值函数 J(v, h)：h 层 DP 后的最小累计自误差
     J = np.zeros((task.n_states, H + 1))
     for h in range(1, H + 1):
         for v in range(task.n_states):
@@ -176,62 +152,59 @@ def run_policy(model: SRPCModel, task: TrapTree, patterns, centroids,
             vals = []
             for a in (0, 1):
                 c = task.child[v][a]
-                future = P[v][a] * J[c, h - 1]
-                # 回弹留在 v 的支线
-                cb = (1.0 - P[v][a]) * J[v, h - 1]
-                vals.append(Err[v][a] + future + cb)
+                future = P[v][a] * J[c, h - 1] + (1.0 - P[v][a]) * J[v, h - 1]
+                vals.append(Err[v][a] + future)
             J[v, h] = min(vals)
     costs = []
     _reset(model)
     v = 0
     for _ in range(eps_steps):
-        model.observe(patterns[v])
-        # 当前自误差（对当前步的实现误差）——由上一 pred 决定，计入累计
-        erl = float(np.linalg.norm(model.xs - model.pred_self)) if _ > 0 else 0.0
+        model.observe(patterns[v])               # xs = encode(v)
         if policy == "greedy":
-            a = int(np.argmin(Err[v]))          # 只看 1 步
+            a = int(np.argmin(Err[v]))           # 只看 1 步自误差
         else:
-            # 选使 H 层 DP 剩余最小的动作
-            cand = []
-            for aa in (0, 1):
-                c = task.child[v][aa]
-                fut = P[v][aa] * J[c, H - 1] + (1.0 - P[v][aa]) * J[v, H - 1]
-                cand.append(Err[v][aa] + fut)
+            cand = [Err[v][aa]
+                    + P[v][aa] * J[task.child[v][aa], H - 1]
+                    + (1.0 - P[v][aa]) * J[v, H - 1]
+                    for aa in (0, 1)]
             a = int(np.argmin(cand))
-        # 记录"执行动作 a 后预测 t+1 的误差期望"当成本步代价
-        model.prepare_next(a)
-        costs.append(float(np.linalg.norm(model.xs - model.pred_self)))
-        v = task.step(v, a, rng)
+        model.prepare_next(a)                    # pred = wdyn(v,a)
+        pred = model.pred_self.copy()
+        nxt = task.step(v, a, rng)               # 实际 next
+        model.observe(patterns[nxt])             # xs = encode(nxt)
+        costs.append(float(np.linalg.norm(pred - model.xs)))
+        v = nxt
     model.set_learning(True)
     return np.array(costs)
 
 
 def _learned_params(model, task, patterns, centroids):
-    """重新量测冻结模型的 (Err, P) —— 与 train 里的测法一致（但只量一次，快）。"""
+    """重新量测冻结模型的经验转移参数，全部基于**自学 Wdyn**：
+      Err[v][a] = 平均真实自误差 || pred_self(v,a) − xs(实际next) ||  (转移方差)，
+      P[v][a]   = 从 v 走 a 到达 child 的经验概率。
+    **受控采样**：对每个 (v,a) 独立重样本 K 次（不依赖某条吸收随机游走），
+    避免吸收叶困住游走导致内部节点估计为噪声/零。
+    """
     Err = np.zeros((task.n_states, 2))
     P = np.zeros((task.n_states, 2))
+    naction = np.zeros((task.n_states, 2))
     model.set_learning(False)
-    n_meas = 400
-    rep = np.zeros(task.n_states)
     rng = np.random.default_rng(7)
-    _reset(model)
-    v = 0
-    for _ in range(n_meas):
-        model.observe(patterns[v])
-        rep[v] += 1
+    n_meas = 80                       # 每个 (v,a) 的采样次数
+    for vv in range(task.n_states):
         for a in (0, 1):
-            model.prepare_next(a)
-            Err[v][a] += float(np.linalg.norm(patterns[v] * 0 + model.xs - model.pred_self))
-        a = int(rng.integers(2))
-        model.prepare_next(a)
-        nxt = task.step(v, a, rng)
-        if not task.is_leaf[v] and nxt == task.child[v][a]:
-            P[v][a] += 1.0
-        v = nxt
-    for v in range(task.n_states):
-        Err[v] /= max(rep[v], 1)
-        if not task.is_leaf[v]:
-            P[v] /= max(rep[v], 1)
+            for _ in range(n_meas):
+                model.observe(patterns[vv])      # xs = encode(vv)
+                model.prepare_next(a)            # pred = wdyn(vv,a)
+                pred = model.pred_self.copy()
+                nxt = task.step(vv, a, rng)      # 实际 next
+                model.observe(patterns[nxt])     # xs = encode(nxt)
+                Err[vv][a] += float(np.linalg.norm(pred - model.xs))
+                naction[vv][a] += 1.0
+                if not task.is_leaf[vv] and nxt == task.child[vv][a]:
+                    P[vv][a] += 1.0
+    Err = Err / np.maximum(naction, 1e-9)
+    P = P / np.maximum(naction, 1e-9)
     model.set_learning(True)
     return Err, P
 
@@ -248,10 +221,14 @@ def main() -> int:
     rng = np.random.default_rng(args.seed)
 
     task = TrapTree(rng=rng)
-    # SRPCModel 配置：d_obs 取足够大以容纳 7 个非重叠稀疏模式，上层略宽稳定编码
+    # SRPCModel 配置：d_obs 取足够大以容纳 7 个非重叠稀疏模式。
+    # 用 Phase-0 默认结构稀疏区间（fan_in=0.75/kWTA=0.5）：规则 2 的 Hebbian
+    # 自组织编码 + 规则 3 的 LMS 学 Wdyn，两者长程协同让动力学自我成型。
     d_obs = 48
-    cfg = ModelConfig(d_obs=d_obs, n_l1=24, n_l2=20, n_self=20,
-                      inner_iters=2, fan_in_frac=0.0, kwta_frac=0.0)
+    nself = 20
+    cfg = ModelConfig(d_obs=d_obs, n_l1=24, n_l2=nself, n_self=nself,
+                      inner_iters=3, fan_in_frac=0.75, kwta_frac=0.5,
+                      theta_event=0.01)
     model = SRPCModel(cfg, n_actions=2, rng=np.random.default_rng(args.seed + 1),
                       self_loop=True)
     patterns = encode_state_patterns(task, rng, cfg.d_obs)
