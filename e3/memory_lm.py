@@ -171,3 +171,108 @@ def eval_batch_mem(m, X_np, y_np, tau, mem, groups, beta=1.0
     """带记忆评估（任务要求的 eval_batch_mem，beta 可扫）。"""
     nll, acc = eval_scores(m, X_np, y_np, tau, mem, groups, beta)
     return float(nll.mean()), float(acc.mean())
+
+
+# ----------------------------------------------------------------------
+# F1a：上下文相关的结构化语言记忆（n-gram 条件字节先验）
+# ----------------------------------------------------------------------
+class NgramLangMem:
+    """F1a 结构化慢记忆：把 E3 的"静态 unigram 原型"升级为"n-gram 条件字节先验"。
+
+    动机（承接 E3 判据① FAIL）：unigram 原型只携带"整段语种字节频率"，重建不了旧语种
+    被后训练覆盖的**词级/短程结构**。要在记忆里承载这种结构，先验必须**上下文相关**——
+    给定窗口尾部 `order` 个字节 → 预测下一字节的条件分布。n-gram 把语种流的局部
+    统计（"该语种的字/短序列长什么样"）固化进 slow 记忆，恰好是 unigram 缺的那层。
+
+    记忆内容 = 该语种**训练段自身**的条件字节计数（语言自带的结构/统计固化成原型的
+    "稳定的、重复的"部分），并离线从 train 段确定性重建（与 E0/E3 同款确定性口径）。
+
+    参考实现细节：
+      - 每语种 group 一个 dict：prefix_bytes(0..order-1) -> (256,) 计数；
+      - 同时存 unigram 计数（用作**回退** + selfid 判语种的原型）；
+      - 读出：p(y) = λ·p_cond(y|tail) + (1-λ)·p_unigram(y)；tail=窗口最后 order 字节；
+        未见过的前缀 → 回退到 unigram（无信息则近均匀）。
+      - 线性插值（λ 权）比硬 Katz 回退更稳，且 order=0 时自动退化为 unigram（复现 E3）。
+      注入公式不变：logit_mem = logit + beta·tau·log p(y|tail,lang)。beta=0 即无记忆。
+    """
+
+    def __init__(self, n_groups: int, C: int = 256, order: int = 2,
+                 device: str = "cuda", smooth: float = 1e-4, lam: float = 0.9):
+        self.n_groups = int(n_groups)
+        self.C = int(C)
+        self.order = int(order)                 # n-gram 阶数（容量轴：0=unigram 基线）
+        self.device = torch.device(device)
+        self.smooth = float(smooth)             # 计数平滑（防 log0）
+        self.lam = float(lam)                   # 条件与 unigram 的线性插值权
+        self.unigram = np.zeros((n_groups, C), np.float64)
+        self.cond: list[dict] = [None] * n_groups   # group -> {prefix: counts}
+
+    # ------------------------------------------------------------------
+    # 写入：从该语种训练段字节序列确定性重建计数
+    # ------------------------------------------------------------------
+    def build_from_segments(self, segs) -> None:
+        for gi, (_lang, b) in enumerate(segs):
+            self._build_group(gi, b)
+
+    def _build_group(self, gi: int, b: np.ndarray) -> None:
+        self.unigram[gi] += np.bincount(b, minlength=self.C).astype(np.float64)
+        if self.order == 0:
+            return
+        d: dict = {}
+        o = self.order
+        for t in range(o, len(b) - 1):
+            pref = b[t - o:t].tobytes()
+            y = int(b[t])
+            row = d.get(pref)
+            if row is None:
+                row = np.zeros(self.C, np.float64)
+                d[pref] = row
+            row[y] += 1.0
+        self.cond[gi] = d
+
+    # ------------------------------------------------------------------
+    # 读取：上下文相关的 log-prob 先验
+    # ------------------------------------------------------------------
+    def mem_logit(self, win_bytes: np.ndarray, group: int) -> torch.Tensor:
+        """返回 (C,) log-prob 先验向量（给定窗口尾部 + 语种）。
+
+        win_bytes: (W,) uint8 窗口字节（含尾部 `order` 字节作为条件）。group: 语种索引。
+        """
+        sm = self.smooth
+        C = self.C
+        uni = self.unigram[group]
+        p_uni = (uni + sm) / (uni.sum() + sm * C)
+        if self.order > 0 and self.cond[group] is not None:
+            pref = win_bytes[-self.order:].tobytes()
+            row = self.cond[group].get(pref)
+            if row is not None:
+                p_cond = (row + sm) / (row.sum() + sm * C)
+                p = self.lam * p_cond + (1.0 - self.lam) * p_uni
+                p = p / p.sum()
+                return torch.as_tensor(np.log(p), dtype=torch.float32,
+                                       device=self.device)
+        # 未见前缀 / order=0 → 回退 unigram
+        return torch.as_tensor(np.log(p_uni), dtype=torch.float32,
+                               device=self.device)
+
+    # ------------------------------------------------------------------
+    # 自识别闭环：窗口字节直方图 vs 各语种 marginal(unigram) 原型（余弦）
+    # ------------------------------------------------------------------
+    def _proto_mat(self) -> np.ndarray:
+        sm = self.smooth
+        protos = np.zeros((self.n_groups, self.C), np.float64)
+        for g in range(self.n_groups):
+            c = self.unigram[g] + sm
+            protos[g] = c / c.sum()
+        return protos
+
+    def selfid(self, X_win_np: np.ndarray) -> int:
+        hist = X_win_np.sum(axis=0).astype(np.float64)
+        hn = hist / (np.linalg.norm(hist) + 1e-12)
+        pn = self._proto_mat()
+        pn = pn / (np.linalg.norm(pn, axis=1, keepdims=True) + 1e-12)
+        d = 1.0 - pn @ hn
+        return int(d.argmin())
+
+    def stable(self, group: int) -> float:
+        return float(self.unigram[group].sum())
