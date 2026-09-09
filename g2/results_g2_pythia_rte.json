@@ -1,0 +1,38 @@
+{
+  "models": {
+    "pythia-14m": {
+      "k_list": [
+        0,
+        2,
+        4,
+        8
+      ],
+      "acc_k0": 0.4805,
+      "wall_k0": 0.7,
+      "acc_k2": 0.4805,
+      "wall_k2": 0.4,
+      "acc_k4": 0.4727,
+      "wall_k4": 0.5,
+      "acc_k8": 0.5156,
+      "wall_k8": 0.8
+    },
+    "pythia-31m": {
+      "k_list": [
+        0,
+        2,
+        4,
+        8
+      ],
+      "acc_k0": 0.4766,
+      "wall_k0": 0.3,
+      "acc_k2": 0.4766,
+      "wall_k2": 0.4,
+      "acc_k4": 0.4766,
+      "wall_k4": 0.5,
+      "acc_k8": 0.4766,
+      "wall_k8": 0.8
+    }
+  },
+  "template": "premise: {premise}",
+  "seed": 0
+}

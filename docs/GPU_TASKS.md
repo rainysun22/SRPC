@@ -37,12 +37,13 @@
 - 与 T1 同批：同数据、同参数量、同样本流（batch 32）的 numpy TwinMLP（CPU，与 pilot
   同一实现口径，保证对照连续性）；全 epoch 每档一跑，逐档 JSON 落盘。
 
-## T3：G2 同规模 LLM 推理评测
+## T3：G2 同规模 LLM 推理评测 —— ✅ 完成（2026-09-09，RTX 4090）
 
 - **触发**：G2 启动前（W9 前）
 - **内容**：pythia-14m / pythia-31m 在统一基准上推理评测（CPU 可跑小模型但慢，GPU 提效）
 - **估算**：< 1 GPU·时
-- **说明**：须标注 Pile 训练域差异 caveat；主对照仍是 T2 孪生
+- **结果**：GLUE RTE few-shot（k∈{0,2,4,8}，256 条）全程 **CUDA** 跑通；14m acc 0.47–0.52、31m 0.477 随 k 贴随机基线（50%）。pythia 为无监督原始权重无推理微调，few-shot 在 RTE 上不超随机，属诚实预期对照。详见 results_phaseG/report_g2.md；结果 g2/results_g2_pythia_rte.json，模型经 hf-mirror 下载。
+- **说明**：Pile 训练域差异 caveat 已在报告标注；主对照仍是 T2 孪生。
 
 ## T4：G3 组合泛化规模测试（可选）
 

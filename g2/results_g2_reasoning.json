@@ -1,0 +1,63 @@
+{
+  "phase": "G2a",
+  "task": "combination-reasoning closed loop, slot-HRR binding memory, color-relation ICL (M=120, 8x8 grids, d=2048, device=cpu)",
+  "ks": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    6,
+    8,
+    10,
+    12
+  ],
+  "trials": 1500,
+  "seeds": 5,
+  "d": 2048,
+  "acc_uncond": {
+    "0": 0.0529,
+    "1": 0.1489,
+    "2": 0.4063,
+    "3": 0.6185,
+    "4": 0.7625,
+    "6": 0.9108,
+    "8": 0.9661,
+    "10": 0.9893,
+    "12": 0.9968
+  },
+  "acc_cond": {
+    "0": 0.0,
+    "1": 1.0,
+    "2": 1.0,
+    "3": 1.0,
+    "4": 1.0,
+    "6": 1.0,
+    "8": 1.0,
+    "10": 1.0,
+    "12": 1.0
+  },
+  "cover_frac": {
+    "0": 0.0,
+    "1": 0.103,
+    "2": 0.373,
+    "3": 0.596,
+    "4": 0.748,
+    "6": 0.906,
+    "8": 0.965,
+    "10": 0.989,
+    "12": 0.996
+  },
+  "composition": {
+    "combo_ok": 1.0,
+    "combo_trials": 1492
+  },
+  "judges": {
+    "acc0_chance_le_025": true,
+    "cond_acc_ge_085": true,
+    "fewshot_gain": true,
+    "combo_gens_unseen": true
+  },
+  "demo_note": "SLOT-HRR per-source slot decouples binding -> no additive crosstalk; reasoning = unbind+cleanup (linear, no backprop); \u7ec4\u5408=\u94fe\u5f0f\u89e3\u7ed1 r2\u2218r1.",
+  "capacity_note": "additive S=\u03a3bind HRR has crosstalk: \u5355\u7ed1\u5b9a\u89e3\u5bf9\u73871.0, 5\u7ed1\u5b9a\u53e0\u540e~0.69/\u8272, \u5347\u7ef4d=16384/\u53bb\u91cd\u5747\u65e0\u6548(\u673a\u5236\u6027),\u89c1 debug3-5. slot \u7248\u89c4\u907f\u4e4b\u5e76\u4fdd\u7559\u7b97\u5b50\u3002"
+}
