@@ -45,11 +45,15 @@
 - **结果**：GLUE RTE few-shot（k∈{0,2,4,8}，256 条）全程 **CUDA** 跑通；14m acc 0.47–0.52、31m 0.477 随 k 贴随机基线（50%）。pythia 为无监督原始权重无推理微调，few-shot 在 RTE 上不超随机，属诚实预期对照。详见 results_phaseG/report_g2.md；结果 g2/results_g2_pythia_rte.json，模型经 hf-mirror 下载。
 - **说明**：Pile 训练域差异 caveat 已在报告标注；主对照仍是 T2 孪生。
 
-## T4：G3 组合泛化规模测试（可选）
+## T4：G3 组合泛化规模测试 —— ✅ 完成（2026-09-09，CPU，无需 GPU）
 
 - **触发**：G3 且组合增益单调性在 CPU 规模下成立
 - **内容**：片段重组规模扩大（更多变换/更深组合），压力测试
 - **估算**：视规模定，先 CPU 探边界再决定是否上 GPU
+- **结果（closed）**：纯 NumPy/HRR 的确定性符号任务，CPU 探边界即完成、**无需上 GPU**。
+  规模轴=组合深度 m：功能组合（slot-HRR）增益随 m 单调 PASS；容量受限基座（加性叠加）返降上限
+  m*=3/11/43 @ d=128/512/2048。见 results_phaseG/report_g3.md 与 g3/results_g3_composition.json。
+  此任务已达成，不再启用 GPU。
 
 ## 契约与不变量（移植版强制）
 
