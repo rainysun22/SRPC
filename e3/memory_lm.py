@@ -77,17 +77,50 @@ class LangSlowMem:
             return None
         return torch.as_tensor(np.log(p), dtype=torch.float32, device=self.device)
 
+    # ------------------------------------------------------------------
+    # 自识别闭环：从输入窗口字节直方图判语种 → 取对应原型（无需标签）
+    # 只用记忆自身固化的原型 + 模型输入，即可闭环"找到该注入哪个原型"。
+    # ------------------------------------------------------------------
+    def _proto_mat(self) -> np.ndarray:
+        """(n_groups, C) 归一概率原型矩阵（含 smooth）；无样本组按均匀先验。"""
+        protos = np.zeros((self.n_groups, self.C), np.float64)
+        for g in range(self.n_groups):
+            cnt = self.counts[g]
+            if cnt.sum() <= 0:
+                protos[g] = 1.0 / self.C
+            else:
+                c = cnt + self.smooth
+                protos[g] = c / c.sum()
+        return protos
+
+    def selfid(self, X_win_np: np.ndarray) -> int:
+        """单 16 字节窗口 -> 判语种 index：窗口字节直方图 距离最近 语种原型（余弦）。
+
+        这是闭环接入的自识别开关：只用窗口输入字节 + 记忆原型，不取真实标签。
+        窗口 insufficient 时（段首/边界）仍可能判错，恰好度量"自识别闭环"的代价。
+        """
+        hist = X_win_np.sum(axis=0).astype(np.float64)          # (256,) 窗口字节次数
+        hn = hist / (np.linalg.norm(hist) + 1e-12)
+        protos = self._proto_mat()
+        pn = protos / (np.linalg.norm(protos, axis=1, keepdims=True) + 1e-12)
+        d = 1.0 - pn @ hn                                       # (n_groups,) 余弦距离
+        return int(d.argmin())
+
 
 # ----------------------------------------------------------------------
 # 带记忆的逐样本判分（两臂共用），再子集化算 total/switch/within
 # ----------------------------------------------------------------------
 def eval_scores(m, X_np: np.ndarray, y_np: np.ndarray, tau: float,
-                mem: LangSlowMem | None = None, groups=None, beta: float = 0.0
-                ) -> tuple[np.ndarray, np.ndarray]:
+                mem: LangSlowMem | None = None, groups=None, beta: float = 0.0,
+                selfid: bool = False) -> tuple[np.ndarray, np.ndarray]:
     """返回 (nll_per, acc_per)：逐样本负对数似然(bits)与是否命中。
 
     无记忆（mem=None 或 beta=0）== 原 eval_batch 口径。
-    有记忆：每样本 recall groups[i] 语种原型先验，logit_mem = logit + beta*tau*logprotop。
+    有记忆：
+      - selfid=False：每样本 recall groups[i]（真实语种 label，= oracle recall）
+      - selfid=True ：每样本用窗口字节直方图自识别语种后再 recall
+        （闭环接入：不依赖标签，只靠窗口输入 + 记忆固化的原型）。
+    logit_mem = logit + beta*tau*logprotop。
     """
     m.learning = False
     n = len(y_np)
@@ -97,7 +130,8 @@ def eval_scores(m, X_np: np.ndarray, y_np: np.ndarray, tau: float,
         m._infer(X_np[i].ravel(), None, None)
         logit = torch.mv(m.W_out.t(), m._x2) + m.b_out
         if mem is not None and beta != 0.0:
-            lp = mem.mem_logit(int(groups[i]))
+            g = mem.selfid(X_np[i]) if selfid else int(groups[i])
+            lp = mem.mem_logit(g)
             if lp is not None:
                 logit = logit + beta * tau * lp
         p = torch.softmax(logit / tau, dim=0)
@@ -106,6 +140,15 @@ def eval_scores(m, X_np: np.ndarray, y_np: np.ndarray, tau: float,
         acc[i] = bool(int(p.argmax().item()) == int(y_np[i]))
     m.learning = True
     return nll, acc
+
+
+def selfid_acc(mem: LangSlowMem, X_np: np.ndarray, groups) -> np.ndarray:
+    """闭环自识别判语种命中率：只用窗口 + 原型，对照真实语种。"""
+    n = len(groups)
+    hit = np.zeros(n, np.bool_)
+    for i in range(n):
+        hit[i] = bool(mem.selfid(X_np[i]) == int(groups[i]))
+    return hit
 
 
 def _agg(nll: np.ndarray, acc: np.ndarray, mask: np.ndarray | None = None
