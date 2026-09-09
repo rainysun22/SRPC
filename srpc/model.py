@@ -61,6 +61,13 @@ class SRPCModel:
         self.na = n_actions
         self.self_loop = self_loop
         self.learning = True
+        # G4：感知编码阶段门控 —— 规则2(Hebbian)码稳定后冻结，让规则3(LMS)在
+        # 近静态码上收敛（自组织码漂移是叶"持久→零误差"未被学到的主因）。
+        self.learn_perceptual = True
+        # G4：动力学阶段门控 —— 与感知编码互补：阶段1 只自组织编码（关闭动力学），
+        # 阶段2 冻结编码、集中让 Wdyn(LMS) 在静态码上按动作收敛。避免两套目标
+        # （漂移码 + 动作条件化）在同一步相互干扰（这是 v0a1/v1a1 动作分离失败根因）。
+        self.learn_dynamics = True
 
         # 生成权重（非负部件字典；Wdyn 为有符号动力学模型）
         self.W10 = _colnorm(rng.uniform(0.5, 1.0, (cfg.d_obs, cfg.n_l1)))
@@ -194,7 +201,8 @@ class SRPCModel:
                     a = self.last_action
                     self.U_action[a] += cfg.u_action_rate * (nrm - self.U_action[a])
             # 自我预测器局部 LMS 修正（ΔW ∝ 局部误差 × 突触前活动，免反传）
-            if self.learning and self.last_z is not None:
+            # learn_dynamics 门：阶段2 集中动力学收敛（阶段1 编码自组织不污染 Wdyn）
+            if self.learning and self.learn_dynamics and self.last_z is not None:
                 gate = self.last_z > cfg.theta_syn
                 self.Wdyn *= (1.0 - cfg.dyn_decay)
                 self.Wdyn += cfg.eta_dyn * np.outer(e_self, self.last_z * gate)
@@ -203,7 +211,7 @@ class SRPCModel:
 
         # ---------- 规则 2：局部 Hebbian 学习（活跃门控） ----------
         evw = 0.0
-        if self.learning:
+        if self.learning and self.learn_perceptual:
             lr = cfg.eta_w * boost
             g1 = self.x1 > cfg.theta_syn
             self.W10 += lr * np.outer(e0, self.x1 * g1)

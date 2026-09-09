@@ -1,0 +1,149 @@
+{
+  "phase": "G4",
+  "encoding": "selforg (block RF + alpha=0.1/beta=0.5), no pin",
+  "purpose": "无预钉下 x_self 码自发可区分 + 规则3 LMS 动力学种子稳定 → 6/6 前瞻>近视",
+  "per_seed": [
+    {
+      "seed": 0,
+      "train_steps": 8000,
+      "episodes": 120,
+      "H": 6,
+      "ep_horizon": 40,
+      "selforg_code": {
+        "state_sep_min": 0.2922,
+        "zero_states": 0,
+        "expect_fit_rmse": 0.2011
+      },
+      "frozen_decode_acc": 0.7739,
+      "greedy": 9.1584,
+      "lookahead": 3.3071,
+      "rel_improv": 0.6389,
+      "judges": {
+        "dec_self_learned": true,
+        "lookahead_lt_greedy": true,
+        "improve_with_H": true,
+        "greedy_loss": true
+      },
+      "pass": true
+    },
+    {
+      "seed": 1,
+      "train_steps": 8000,
+      "episodes": 120,
+      "H": 6,
+      "ep_horizon": 40,
+      "selforg_code": {
+        "state_sep_min": 0.3683,
+        "zero_states": 0,
+        "expect_fit_rmse": 0.205
+      },
+      "frozen_decode_acc": 0.7525,
+      "greedy": 8.2769,
+      "lookahead": 3.7816,
+      "rel_improv": 0.5431,
+      "judges": {
+        "dec_self_learned": true,
+        "lookahead_lt_greedy": true,
+        "improve_with_H": true,
+        "greedy_loss": true
+      },
+      "pass": true
+    },
+    {
+      "seed": 2,
+      "train_steps": 8000,
+      "episodes": 120,
+      "H": 6,
+      "ep_horizon": 40,
+      "selforg_code": {
+        "state_sep_min": 0.2964,
+        "zero_states": 0,
+        "expect_fit_rmse": 0.262
+      },
+      "frozen_decode_acc": 0.6829,
+      "greedy": 3.0209,
+      "lookahead": 3.2521,
+      "rel_improv": -0.0765,
+      "judges": {
+        "dec_self_learned": true,
+        "lookahead_lt_greedy": false,
+        "improve_with_H": false,
+        "greedy_loss": false
+      },
+      "pass": false
+    },
+    {
+      "seed": 3,
+      "train_steps": 8000,
+      "episodes": 120,
+      "H": 6,
+      "ep_horizon": 40,
+      "selforg_code": {
+        "state_sep_min": 0.2404,
+        "zero_states": 0,
+        "expect_fit_rmse": 0.2115
+      },
+      "frozen_decode_acc": 0.7257,
+      "greedy": 8.2559,
+      "lookahead": 3.4629,
+      "rel_improv": 0.5806,
+      "judges": {
+        "dec_self_learned": true,
+        "lookahead_lt_greedy": true,
+        "improve_with_H": true,
+        "greedy_loss": true
+      },
+      "pass": true
+    },
+    {
+      "seed": 4,
+      "train_steps": 8000,
+      "episodes": 120,
+      "H": 6,
+      "ep_horizon": 40,
+      "selforg_code": {
+        "state_sep_min": 0.2316,
+        "zero_states": 0,
+        "expect_fit_rmse": 0.2212
+      },
+      "frozen_decode_acc": 0.6861,
+      "greedy": 8.5314,
+      "lookahead": 3.1919,
+      "rel_improv": 0.6259,
+      "judges": {
+        "dec_self_learned": true,
+        "lookahead_lt_greedy": true,
+        "improve_with_H": true,
+        "greedy_loss": true
+      },
+      "pass": true
+    },
+    {
+      "seed": 5,
+      "train_steps": 8000,
+      "episodes": 120,
+      "H": 6,
+      "ep_horizon": 40,
+      "selforg_code": {
+        "state_sep_min": 0.2221,
+        "zero_states": 0,
+        "expect_fit_rmse": 0.1915
+      },
+      "frozen_decode_acc": 0.7138,
+      "greedy": 8.5507,
+      "lookahead": 3.9263,
+      "rel_improv": 0.5408,
+      "judges": {
+        "dec_self_learned": true,
+        "lookahead_lt_greedy": true,
+        "improve_with_H": true,
+        "greedy_loss": true
+      },
+      "pass": true
+    }
+  ],
+  "summary": {
+    "pass_rate": "5/6",
+    "mean_rel_improv": 0.4755
+  }
+}

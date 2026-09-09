@@ -1,0 +1,172 @@
+{
+  "diag": [
+    {
+      "seed": 0,
+      "state_norm": [
+        0.051,
+        0.038,
+        0.157,
+        0.195,
+        0.065,
+        0.047,
+        0.042
+      ],
+      "zero_states": 0,
+      "support_size_per_state": [
+        3,
+        3,
+        6,
+        8,
+        10,
+        9,
+        8
+      ],
+      "max_support_overlap_frac": 1.0,
+      "mean_pairwise_dist": 0.118,
+      "min_pairwise_dist": 0.013,
+      "cos_max_pair": 0.995,
+      "nn_decode_hits": "5/7",
+      "decode_acc": 0.714
+    },
+    {
+      "seed": 1,
+      "state_norm": [
+        0.015,
+        0.015,
+        0.07,
+        0.085,
+        0.098,
+        0.063,
+        0.077
+      ],
+      "zero_states": 0,
+      "support_size_per_state": [
+        1,
+        1,
+        10,
+        6,
+        7,
+        10,
+        10
+      ],
+      "max_support_overlap_frac": 1.0,
+      "mean_pairwise_dist": 0.086,
+      "min_pairwise_dist": 0.0,
+      "cos_max_pair": 1.0,
+      "nn_decode_hits": "6/7",
+      "decode_acc": 0.857
+    },
+    {
+      "seed": 2,
+      "state_norm": [
+        0.03,
+        0.03,
+        0.119,
+        0.101,
+        0.06,
+        0.057,
+        0.072
+      ],
+      "zero_states": 0,
+      "support_size_per_state": [
+        1,
+        1,
+        10,
+        8,
+        6,
+        7,
+        10
+      ],
+      "max_support_overlap_frac": 1.0,
+      "mean_pairwise_dist": 0.084,
+      "min_pairwise_dist": 0.0,
+      "cos_max_pair": 1.0,
+      "nn_decode_hits": "6/7",
+      "decode_acc": 0.857
+    },
+    {
+      "seed": 3,
+      "state_norm": [
+        0.01,
+        0.01,
+        0.096,
+        0.14,
+        0.079,
+        0.049,
+        0.071
+      ],
+      "zero_states": 0,
+      "support_size_per_state": [
+        2,
+        2,
+        6,
+        8,
+        10,
+        7,
+        7
+      ],
+      "max_support_overlap_frac": 1.0,
+      "mean_pairwise_dist": 0.099,
+      "min_pairwise_dist": 0.0,
+      "cos_max_pair": 1.0,
+      "nn_decode_hits": "6/7",
+      "decode_acc": 0.857
+    },
+    {
+      "seed": 4,
+      "state_norm": [
+        0.019,
+        0.019,
+        0.057,
+        0.094,
+        0.076,
+        0.062,
+        0.09
+      ],
+      "zero_states": 0,
+      "support_size_per_state": [
+        4,
+        4,
+        10,
+        10,
+        8,
+        6,
+        9
+      ],
+      "max_support_overlap_frac": 1.0,
+      "mean_pairwise_dist": 0.079,
+      "min_pairwise_dist": 0.0,
+      "cos_max_pair": 1.0,
+      "nn_decode_hits": "6/7",
+      "decode_acc": 0.857
+    },
+    {
+      "seed": 5,
+      "state_norm": [
+        0.07,
+        0.036,
+        0.157,
+        0.104,
+        0.076,
+        0.075,
+        0.064
+      ],
+      "zero_states": 0,
+      "support_size_per_state": [
+        2,
+        2,
+        10,
+        9,
+        10,
+        6,
+        10
+      ],
+      "max_support_overlap_frac": 1.0,
+      "mean_pairwise_dist": 0.111,
+      "min_pairwise_dist": 0.036,
+      "cos_max_pair": 0.985,
+      "nn_decode_hits": "6/7",
+      "decode_acc": 0.857
+    }
+  ]
+}
