@@ -230,6 +230,35 @@ checkpoint**、探针**欠拟合**、**尾档预算不满**（见 §1/§5.0/§5.
     - **判定**：**"读出不可接触"在原理层面不成立**——它是 probe 端口径（读出口未联合训练）的假象。
       H1 立式从"隐藏表征对外置线性探针的可读性单调"被外置口径否决，改为"**自-读出头（端到端读出）
       容量随宽度单调**"口径后 **通过** → 承重墙"SR-PC 能力随规模变强"的端到端核验成立。
+2e. **（✅ 已跑·越深越崩 修复落地 2026-09-10·诊断+文献+方案）**：深推断失稳的机制定位与对因修复。
+    `scripts/diag_deepinfer.py`（冻结权重、逐迭代轨迹）→ `scripts/validate_w3cap.py`（方案验证）
+    → 产物 `results_e2_gpu_eta/deepinfer_trace.json`。
+
+    **诊断（否决"饱和死锁"假，定位=振荡+能量爆发）**
+    - 4032/1856 自由推断 1..48 步 `x2_sat_frac` **全程≈0**（不顶 `x_max=5.0`）。
+    - 4032：`x2_flip_frac`（Δx2 相对上步变号比例）iter5→6 由 0.21 跳到 0.71、iter7→8 起**钉死 0.99**
+      = 2 周期符号翻转振荡；同时 `x2_mean` 单调漂升 0.036→0.20、`x3_mean` 涨 3 倍 → **能量上升发散**。
+    - 1856：flip 只封顶 **0.63**、`x2_mean` 恒定 ~0.016 → **有界振荡**（BPC 仍改善到 48）。
+    → 深推断崩溃 = **非收缩区间被越入**：`x2⇄W3⇄x3` 闭环 σmax(W3)²≈25>>1，宽模型有效增益更狠越界。
+
+    **文献归因（不瞎猜）**
+    - Mali / Salvatori / Ororbia《Tight Stability…for PCNs》：PC 推断是能量下降的李雅普诺夫动力学，
+      稳定性由 Lipschitz 界决定，**步长须 < 1/Lipschitz**。
+    - Ha et al. ICLR'26《Meta-PCN》：深/宽 PC 失稳 = **随权重方差膨胀的预测误差爆炸（EVPE）**，
+      修复=权重归一化压方差。← 与"宽模型越界更狠、单并 σmax(W3) 不随宽度"观测自洽。
+
+    **方案验证与落地**
+    - 单修 W3 谱归一化不足（cap=1.5 时闭环增益 η²≈2.25 仍>1，4052@48 仍崩到 acc0.19/bpc10.2）。
+    - **纯推断期把 x2/x3 步长（`et2`/`eta_out`）×`eta_inf_scl=0.5` 压入收缩界即彻底稳定**（真实 `_infer`
+      复验，4032）：
+      | scl | it12 | it48 |
+      |---|---|---|
+      | 1.0 | acc0.280/bpc6.55 | acc**0.010**/bpc**16.31**/mean0.198（崩） |
+      | 0.5 | acc0.230/bpc6.60 | acc**0.260**/bpc**6.49**/mean0.0058（稳定，反超浅迭代） |
+    - 1856 同稳（it48 acc0.23/bpc6.42，mean 恒定 ~0.008）；`mean` 恒定、sat=0 → 收缩收敛而非振荡。
+    - 落地：`E2Config.eta_inf_scl`（默认 1.0 保既有 E 档；深推断协议设 0.5）+ GPU/numpy 双后端
+      `_infer` 自由推断分支，**只缩放 do_out 段，不动训练钳制路径与浅推断默认**。方案级、纯推断期、
+      不重训、不违局部规则/免反传/结构稀疏三原则。
 5. **补孪生 2832/4032**：补参照线使 ratio 覆盖 5 档（CPU BP，耗时，非阻塞项）。
 4. **验段噪声**：n=600 档间差 ~1–2σ；可行时扩 eval 窗口或多次播种取均值。
 
@@ -237,5 +266,7 @@ checkpoint**、探针**欠拟合**、**尾档预算不满**（见 §1/§5.0/§5.
 
 - `report_h0.md`：承重墙基线复盘（可信基线 L1–L4）。
 - `report_h1.md`：本文。
-- 本地脚本：`scripts/run_h1_probe.py`（探针）、`scripts/diag_h1_x2.py`（自有头诊断）。
-- 产物（4090）：`results_e2_gpu/h1_probe.json`、`results_e2_gpu_fix/*_{fix}.pt`。
+- 本地脚本：`scripts/run_h1_probe.py`（探针）、`scripts/diag_h1_x2.py`（自有头诊断）、
+  `scripts/diag_deepinfer.py`（深推断轨迹诊断）、`scripts/validate_w3cap.py`（收缩步长方案验证）。
+- 产物（4090）：`results_e2_gpu/h1_probe.json`、`results_e2_gpu_fix/*_{fix}.pt`、
+  `results_e2_gpu_eta/deepinfer_trace.json`。

@@ -183,6 +183,10 @@ class LMPCN:
         th = cfg.theta_event
         it = self.iters if iters is None else iters
         do_out = (not clamp) if free_out is None else free_out
+        # 收缩步长：自由推断期压入收缩界（H1 深推断失稳对因修复，见 E2Config.eta_inf_scl）
+        scl = cfg.eta_inf_scl if do_out else 1.0
+        et2_e = self.et2 * scl
+        eta_out_e = cfg.eta_out * scl
         for _ in range(it):
             # e0（块紧凑）：pred0[b] = s1·W1c[b] @ x1g[b]
             pred0 = np.matmul(W1c, x1g[:, :, None])[:, :, 0]
@@ -200,7 +204,7 @@ class LMPCN:
             g1 = np.abs(u1) > th
             g2 = np.abs(u2) > th
             x1g = np.clip(x1g + self.et1 * u1 * g1, 0.0, cfg.x_max)
-            x2 = np.clip(x2 + self.et2 * u2 * g2, 0.0, cfg.x_max)
+            x2 = np.clip(x2 + et2_e * u2 * g2, 0.0, cfg.x_max)
             if cfg.kwta_every_iter:
                 # 每迭代 k-WTA（E1 谱系）：宽网络下增量小、保留旧子集，
                 # 新单元难激活（死锁）——默认仅循环末一次，见 kwta_every_iter。
@@ -210,7 +214,7 @@ class LMPCN:
                 # x3 自由变量（能量梯度 LS 读出，E1 谱系对照路径；E2 主
                 # 判分走 W_out 线性读出，见 eval_batch）
                 e2 = x2 - self.W3 @ x3
-                x3 = np.clip(x3 + cfg.eta_out * (self.W3.T @ e2),
+                x3 = np.clip(x3 + eta_out_e * (self.W3.T @ e2),
                              0.0, 1.0)
         # k-WTA（循环末一次：竞争选择活跃表征，保持整层稀疏，不变量 3）
         x1g = _kwta2d(x1g, cfg.kwta_frac)

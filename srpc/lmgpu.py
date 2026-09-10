@@ -129,6 +129,10 @@ class LMPCNg:
         th = cfg.theta_event
         it = self.iters if iters is None else iters
         do_out = (not clamp) if free_out is None else free_out
+        # 收缩步长：自由推断期把 x2/x3 更新步长压入收缩界，杜绝深迭代振荡/能量爆发
+        scl = cfg.eta_inf_scl if do_out else 1.0
+        et2_e = self.et2 * scl
+        eta_out_e = cfg.eta_out * scl
         W1c, W1cT, W2, W3 = self.W1c, self.W1cT, self.W2, self.W3
         for _ in range(it):
             pred0 = torch.matmul(W1c, x1g.unsqueeze(-1)).squeeze(-1)
@@ -143,13 +147,13 @@ class LMPCNg:
             g1 = u1.abs() > th
             g2 = u2.abs() > th
             x1g = (x1g + self.et1 * u1 * g1).clamp(0.0, cfg.x_max)
-            x2 = (x2 + self.et2 * u2 * g2).clamp(0.0, cfg.x_max)
+            x2 = (x2 + et2_e * u2 * g2).clamp(0.0, cfg.x_max)
             if cfg.kwta_every_iter:
                 x1g = _kwta2d_t(x1g, cfg.kwta_frac)
                 x2 = _kwta_t(x2, cfg.kwta_frac)
             if do_out:
                 e2 = x2 - torch.mv(W3, x3)
-                x3 = (x3 + cfg.eta_out * torch.mv(W3.t(), e2)).clamp(
+                x3 = (x3 + eta_out_e * torch.mv(W3.t(), e2)).clamp(
                     0.0, 1.0)
         x1g = _kwta2d_t(x1g, cfg.kwta_frac)
         x2 = _kwta_t(x2, cfg.kwta_frac)

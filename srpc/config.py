@@ -435,6 +435,15 @@ class E2Config:
     w2_cap_every: int = 2000    # 每 N 步执行一次（>1 周期；=1 每步，配幂迭代法开销可忽略）
     w2_smax_cap: float = 8.0    # σmax(W2) 上限
     w2_pow_iters: int = 6       # 幂迭代次数（估计 W2 顶奇异值，O(n²)，免每步 SVD）
+    # 稳定性修复：自由推断收缩步长（阶段 H1 "越深越崩"的对因修复，2026-09-10）
+    # 根因：自由推断 x2⇄W3⇄x3 闭环非收缩（σmax(W3)²≈25>>1），深迭代进入 2 周期
+    #  符号翻转振荡 + 能量上升发散（EVPE 爆发）→ 读出头 acc→0.01/BPC→16.3。
+    #  （诊断证据：deepinfer_trace.json 的 flip_frac→0.99/x2_mean 单调漂升；
+    #   文献：Mali et al. 收缩界 step<1/Lipschitz；Ha et al. ICLR'26 Meta-PCN EVPE。）
+    # 修复：自由推断期把 x2/x3 更新步长（et2/eta_out）乘 eta_inf_scl 压入收缩界。
+    #  已验证 eta_inf_scl=0.5：它ers=12..48 全程 acc 不崩、BPC 单调改善、x2_mean 恒定。
+    #  默认 1.0 保持既有 E 档行为不变；深推断协议设 0.5（配合加深深迭代至 16-48）。
+    eta_inf_scl: float = 1.0     # 自由推断步长收缩因子（<1 收缩；0.5 为已验证稳定值）
     # 推断（锚点值，E1 谱系）
     settle_iters: int = 12             # 锚点网格 {6,12} 裁定
     eta_inf: float = 0.09
