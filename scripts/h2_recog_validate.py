@@ -36,7 +36,10 @@ os.makedirs(RES, exist_ok=True)
 h = int(sys.argv[1]) if len(sys.argv) > 1 else 768
 steps = int(sys.argv[2]) if len(sys.argv) > 2 else 90_000
 recog_lr = float(sys.argv[3]) if len(sys.argv) > 3 else 0.005
-eval_every = int(sys.argv[4]) if len(sys.argv) > 4 else 30_000
+recog_rounds = int(sys.argv[4]) if len(sys.argv) > 4 else 1
+ro_h = int(sys.argv[5]) if len(sys.argv) > 5 else 0     # 0=线性；>0=MLP读头隐层宽
+eval_every = int(sys.argv[6]) if len(sys.argv) > 6 else 30_000
+ss_amp = float(sys.argv[7]) if len(sys.argv) > 7 else 0.0   # v8 识别自监督权重；0=关
 assert h % 16 == 0, f"bad h={h}"
 
 cfg = E2Config()
@@ -47,12 +50,23 @@ cfg.w2_smax_cap = 5.0
 cfg.w2_pow_iters = 8
 cfg.recog_on = True
 cfg.recog_lr = recog_lr
+cfg.recog_rounds = recog_rounds
+if ro_h > 0:
+    cfg.recog_mlp_ro = True
+    cfg.recog_ro_h = ro_h
+    tag = f"lro{ro_h}"
+elif ss_amp > 0.0:
+    cfg.recog_ss = True
+    cfg.recog_ss_amp = ss_amp
+    tag = f"ss{ss_amp}"
+else:
+    tag = f"lr{recog_lr}"
 
 seed = 0
 corpus = ByteCorpus(cfg)
 full = len(corpus.train) - cfg.context - 1
 steps = min(steps, full)
-name = f"h2_recog_{h}_lr{recog_lr}"
+name = f"h2_recog_{h}_{tag}_r{recog_rounds}"
 jpath = os.path.join(RES, f"{name}.json")
 
 rng = np.random.default_rng(seed * 977 + 5)

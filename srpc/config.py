@@ -517,6 +517,84 @@ class E2Config:
     recog_refine: int = 0            # 识别编码后生成侧额外沉降迭代数（0=纯前馈编码）
     recog_act: str = "relu"          # 编码激活："relu"=clamp(0,xmax) / "tanh-like" 备用
     recog_lr: float = 0.01           # 编码器生成侧同步学习率（收敛>光谱稳定）
+    # H2 对因修复 v6：识别编码器迭代信用深度（recog_rounds，2026-09-10）
+    # 诊断（v5 1856@300k）：识别编码器稳定越基线但仍有 ~0.09 差距（acc 0.33 vs 0.42，
+    #   BPC 3.8 vs 2.4）。根因：读头误差只沿识别路径**单趟**回送一遍（W_out→W2→W1c），
+    #   编码器与读头未充分对齐判别最优。文献：EO（Error Optimization，Ahn'24）与
+    #   Meta-PCN（Ha'26）都把"误差重新沉降/多步信credit"作为解决深层信号衰减的核心——
+    #   单步窄 credit 等价于 BP 只反传一层的标志。
+    # 修复（recog_rounds>1）：同一训练样本内把【前馈编码 → 读头 LMS → 编码器局部收紧】
+    #   重复 R 轮；每轮更新权重后**重新编码**得新 x2r（误差随编码器同步演化，非同一静态
+    #   误差复加），再据此重算读头误差、再次收紧 W2/W1c。等价于读头-编码器联合 R 步小步
+    #   信用分配：credit depth 放大且逐轮重算误差，比盲目加大 recog_lr 稳定（对治 v5 在
+    #   lr>0.001 就发散的痛点）。1=单趟（同 v5）。免反传、结构稀疏+列归一+谱截断保留。
+    recog_rounds: int = 1            # 识别编码器每样本 credit 轮数（迭代细化深度）
+    # H2 对因修复 v10：Split-FG 局部 BP credit（recog_fg，2026-09-10）
+    # 诊断（v9 1856@200k）：沉降式判别 PC 稳定后仅 0.30，略超 recog 基线 0.287 但未闭合
+    #   0.33→0.42 与孪生差距；recog(v5/v6) credit 路径缺 relu' 门控（只用 post 激活阈值
+    #   掩码），BP-与-局部对 x2→x1 的 credit 差在这一层。文献：Split-FG（Ren'23）网络分
+    #   主干+头，头梯度精确 + 主干用雅可比向量积(JVP)/relu' 门控估计，免反传逼近 BP。
+    # 修复（recog_fg）：保持 recog 的头梯度精确（g2=W_out^T·(p−y)），把主干 credit 换成
+    #   relu'(pre2) 门控的 g2g → dW2 ∝ x1⊗g2g，再经共享 W2 下沉到 x1 并 relu'(pre1) 门控
+    #   g1g → dW1c ∝ x0rf⊗g1g；即精确含 relu' 的两层 BP credit，完全局部/免反传。
+    #   结构稀疏（k-WTA/事件）+ 列归一 + W2 谱界保留；评估仍走 eval_recog。
+    recog_fg: bool = False           # Split-FG：relu' 门控局部 BP credit（替代 post 掩码）
+    # H2 对因修复 v7：非线性局部读头（readout-capacity，2026-09-10）
+    # 文献（SLL Yin&Corradi'25、Error-Diffusion Yamada'26、Meta-PC Ororbia'25）：
+    #   本地/免反传学习逼近 BP 的两根支柱 = 层直接任务可读性 + 读出容量。v5/v6 证实
+    #   编码器判别信息过度依赖与【单层线性读头】的共演化（固定特征探针 x2r 可读仅0.13，
+    #   远低于在线0.26）；单层线性读头无法把足够任务信号回传给编码器。
+    # 修复（recog_mlp_ro）：读头升级为单隐层 ReLU（两层局部 LMS，全程免 autograd），
+    #   把判别容量 + 任务 credit 深度（读头内多回传一层到编码器）同时增强。
+    #   结构：a = relu(W_r·x2r)，logit = W_out·a；两处误差各自只沿本层权重外积更新。
+    #   b_out/W_out 更新取 a 出错，读头隐藏层回传 W_r.t·e_r 再收紧编码器。0=关（单线性读头）。
+    recog_mlp_ro: bool = False       # 非线性(单隐层 ReLU)局部读头开关
+    recog_ro_h: int = 256            # 读头隐层宽（h_ro；0=复用线性口径）
+    recog_ro_lr: float = 0.05        # 读头隐层两处局部学习率（> 底层 recog_lr）
+    # H2 对因修复 v8：识别自监督 + meta-PE credit 平衡（2026-09-10）
+    # 诊断（h2_recog_probe + v7 全负）：x2r 固定探针可读仅0.13 << 在线0.265 → 编码器
+    #   判别信息过度依赖与读头共演化、本身非内在判别；加大读头容量(v7)不增能力且易
+    #   EVPE 崩(ro512 w2smax→19)。文献（iPC Salvatori'24、tPC-RTRL Potter&Rhodes'26、
+    #   Meta-PCN Ororbia'25）：识别/前向权重应被读头无关的预测目标塑形，而非只被监督头
+    #   拉。修复：给识别编码器一个**读头无关的重建教师**——线性重建读头 R 把 x2r 重建
+    #   回输入 x0rf（R 由本地 LMS 学），其 credit（g2_r = R^T·(rec−x0rf)）与 CE credit
+    #   相加，权重 recog_ss_amp，再对 g2 做 meta-PE（RMS）归一化（recog_g_norm）抑制 EVPE。
+    #   于是 W1c/W2 同时受"类别判别(CE)"+"输入保真(重建)"塑形，表征内在结构化且稳定。
+    recog_ss: bool = False           # 识别自监督(重建教师,读头无关)开关
+    recog_ss_amp: float = 1.0        # 重建 credit g2_r 相对 CE credit 的权重
+    recog_ss_lr: float = 0.05        # 重建读头 R 的本地 LMS 学习率
+    recog_g_norm: bool = True        # meta-PE：收紧编码器前对 g2 做 RMS 归一化(抑制EVPE)
+    recog_g_rms: float = 2.0         # g2 归一化目标 RMS
+    # H2 对因修复 v9：完全判别式 PC（µPC/Meta-PCN 风格，2026-09-10）
+    # 诊断：v5 识别编码器只用 CE 的 1 层截断 credit（g2=W_out^T·err）收紧编码器 →
+    #   表征不内在判别（固定探针 0.13<<在线0.265）；v3-DPC 从零冷启沉降 → 深沉降不稳。
+    # 修复（recog_dpc2）：**从前馈识别态非零启动**，在判别能量
+    #   E = ½||x2−relu(W2^T x1)||² + ½||x1−relu(W1c^T x0)||² + λ·CE(W_out x2)
+    #   下用 relu 门控的完整 credit 沉降 x1/x2（K 步，µP 收缩步长），得到判别沉降态;
+    #   再以【预测沉降目标】(target propagation) + meta-PE RMS 平衡，把类别判别目标
+    #   下沉到 W2/W1c（ΔW2∝(x2set−W2^T x1)⊗x1，ΔW1c∝(x1set−W1c^T x0)⊗x0，均有
+    #   relu 门控），等价逐层把 BP 的全局 credit 吸收进识别权重。
+    recog_dpc2: bool = False         # 完全判别式 PC 训练开关
+    dpc2_settle: int = 8             # 判别能量沉降步数 K（µP 收缩步长下稳定）
+    dpc2_amp: float = 0.8            # 类别 CE 项权重 λ（相对识别残差）
+    dpc2_back: float = 0.6           # x1 沉降中把判别目标下沉的回传权重
+    # H2 对因修复 v11：局部 Adam + 软化正则（recog_adam，2026-09-10）
+    # 诊断（决定性 oracle h2_oraclebp_1856）：识别编码器【同结构】换成真 BP CE + Adam
+    #   → 90k acc0.367 / 180k 0.373，完全追平孪生（gap≈0）与局部机制 0.33 的墙无关；
+    #   证明墙在【局部 credit 的优化动力学】，不在 kWTA/块紧凑/线性读头/relu' 形式。
+    #   v10(Split-FG relu' credit)不应最差(0.255)：credit 路径已是 BP 同款，但被
+    #   事件门控 + meta-PE RMS 归一 + 每步 unit 列归一反复抹平 → 更新方向被压爆。
+    # 文献（iPC Salvatori'24 增量更新更稳、bPC Oxford'25 分类与 BP 相当标准做法=读头
+    # + 自适应优化器）。修复（recog_adam）：保留 v10 的 relu' 门控两层 credit
+    #   （pre2→g2g=relu'(pre2)⊙g2；dW2∝x1⊗g2g；g1=W2·g2g；pre1→g1g；dW1c∝x0rf⊗g1g），
+    #   但权重更新改成【逐突触自适应矩】（局部 Adam：每突触独立 m/v，免 autograd，
+    #   无全局/无反传），并软化破坏性正则：撤事件门控与 meta-PE RMS 归一（credit
+    #   原值进动量），W1c 列归一改 clip(≤1) 容许弱列自由变弱，保留 W2 谱界防爆炸。
+    recog_adam: bool = False         # 局部自适应矩(免反传局部Adam)训练开关
+    recog_adam_lr: float = 3e-4      # 局部 Adam 学习率（对齐 oracle lr=3e-4）
+    recog_adam_b1: float = 0.9       # Adam β1
+    recog_adam_b2: float = 0.999     # Adam β2
+    recog_adam_eps: float = 1e-8     # Adam ε
     # 学习（锚点值）
     eta_w: float = 0.005               # 锚点网格 {0.005,0.01} 裁定（探针：0.005@24iters 最优）
     theta_syn: float = 1e-2

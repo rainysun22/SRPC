@@ -103,6 +103,28 @@ class LMPCNg:
         # 稳定性修复计数器（W2 周期谱截断，见 _maybe_cap_w2）
         self._n_train = 0
         self.last_w2_smax = 0.0
+        # H2 v7：非线性(单隐层 ReLU)局部读头（recog_mlp_ro）。线性口径用 W_out/b_out；
+        # MLP 口径用 a=relu(W_r·x2r)，logit=W_out·a。均为本地 LMS，免 autograd。
+        self._ro_flag = bool(cfg.recog_mlp_ro)
+        self._hro = 0
+        self.W_r = None
+        self.b_r = None
+        if self._ro_flag:
+            self._hro = cfg.recog_ro_h if cfg.recog_ro_h > 0 else self.W_out.shape[0]
+            # (h_ro, h) → a = relu(W_r·x2r)，尺度 1/sqrt(h) 稳定
+            scl = (1.0 / (self.h ** 0.5)) ** 0.5
+            self.W_r = (torch.randn(self._hro, self.h, device=self.device
+                                    ) * scl * 0.5)
+            self.b_r = torch.zeros(self._hro, device=self.device)
+            self.W_out = torch.randn(self.C, self._hro, device=self.device) * 0.5
+            self.b_out = torch.zeros(self.C, device=self.device)
+        # H2 v8：识别自监督重建教师（recog_ss）。R_rr: n_in x h，把 x2r(h) 线性重建回
+        # 输入 x0rf(W*per) 原位，本地 LMS。完全独立于判别读头(W_out/b_out)。
+        # 尺寸按首个 x0rf 实测懒分配（n_in = x0rf.flatten numel，避免字段假设误差）。
+        self._ss_flag = bool(cfg.recog_ss)
+        self.R_rr = None
+        self.b_rr = None
+        self._n_in = 0
         del src
 
     # ---- 规则 1：推断（训练钳制 / 评估自由读出）----
@@ -571,32 +593,297 @@ class LMPCNg:
         self._x1rf, self._x1r, self._x2r = x0rf, x1r, x2r
         self._ev_recog = (x2r > cfg.theta_syn).float().mean().item()
 
+    def _ro_train(self, x2r: torch.Tensor, yoh_t: torch.Tensor
+                  ) -> torch.Tensor:
+        """本地读头：前向 + 局部 LMS，返回传给编码器的任务误差 dL/dx2 (h)。
+
+        linear：logit=W_out.t·x2r+b_out，仅沿 b_out/W_out 一层的本地 credit。
+        mlp(recog_mlp_ro)：a=relu(W_r·x2r+b_r)，logit=W_out·a+b_out 两层各自
+        只沿本层权重外积更新（免 autograd），读头内多回传隐藏层后收紧编码器。
+        """
+        cfg = self.cfg
+        tau = cfg.readout_tau
+        if not self._ro_flag:
+            lr = cfg.readout_lr
+            logit = torch.mv(self.W_out.t(), x2r) + self.b_out
+            p = torch.softmax(logit / tau, dim=0)
+            err = p - yoh_t
+            self.W_out -= (lr * torch.outer(x2r, err))
+            self.b_out -= (lr * err)
+            g2 = torch.mv(self.W_out, err)                 # (h) dL/dx2
+            return g2
+        lr = cfg.recog_ro_lr
+        a = torch.clamp(self.W_r @ x2r + self.b_r, 0.0, cfg.x_max)   # (h_ro)
+        logit = self.W_out @ a + self.b_out
+        p = torch.softmax(logit / tau, dim=0)
+        err = p - yoh_t
+        self.W_out -= (lr * torch.outer(err, a))            # dW_out(C,h_ro)=err⊗a
+        self.b_out -= (lr * err)
+        e_r = self.W_out.t() @ err                          # (h_ro) 隐藏层误差
+        da = (a > 0.0).to(a.dtype)                          # relu 门控
+        self.W_r -= (lr * torch.outer(e_r * da, x2r))       # dW_r(h_ro,h)=(e_r*da)⊗x2r
+        self.b_r -= (lr * (e_r * da))
+        g2 = self.W_r.t() @ (e_r * da)                      # (h) dL/dx2
+        return g2
+
+    def _ro_infer(self, x2r: torch.Tensor) -> torch.Tensor:
+        """读头前向（评估），返回 logit。linear 与 mlp 口径统一。"""
+        cfg = self.cfg
+        if not self._ro_flag:
+            return torch.mv(self.W_out.t(), x2r) + self.b_out
+        a = torch.clamp(self.W_r @ x2r + self.b_r, 0.0, cfg.x_max)
+        return self.W_out @ a + self.b_out
+
+    def _ss_credit(self, x2r: torch.Tensor, x0rf_flat: torch.Tensor
+                   ) -> torch.Tensor:
+        """识别自监督重建 credit（tPC/iPC/Meta-PC，读头无关）。
+
+        线性重建读头 R：rec = R_rr·x2r + b_rr 逼近输入 x0rf（本地 LMS）。
+        返回 g2_r = R_rr^T·(rec−x0rf)（h），把"输入保真"信号回传编码器，
+        与判别读头(W_out)完全独立，使 W1c/W2 同时受判别+重建塑形。
+        """
+        cfg = self.cfg
+        if not self._ss_flag:
+            return torch.zeros_like(x2r)
+        nin = x0rf_flat.numel()
+        if self.R_rr is None or self._n_in != nin:
+            scl = (1.0 / (self.h ** 0.5)) ** 0.5
+            self.R_rr = (torch.randn(nin, self.h, device=self.device)
+                         * scl * 0.5)
+            self.b_rr = torch.zeros(nin, device=self.device)
+            self._n_in = nin
+        rec = torch.mv(self.R_rr, x2r) + self.b_rr        # (n_in)
+        e = rec - x0rf_flat                               # (n_in)
+        lr = cfg.recog_ss_lr
+        self.R_rr -= (lr * torch.outer(e, x2r))           # dR(n_in,h)=e⊗x2r
+        self.b_rr -= (lr * e)
+        return torch.mv(self.R_rr.t(), e)                 # (h) dL/dx2
+
     def train_step_recog(self, x0_np: np.ndarray, y: int) -> float:
-        """显式识别编码器训练（recog_on，2026-09-10）。"""
+        """显式识别编码器训练（recog_on，2026-09-10）。v6 迭代信用深度。
+
+        recog_rounds=R：同一训练样本内把【前馈编码 → 读头 LMS → 编码器局部收紧】
+        重复 R 轮。每轮更新编码器后**重新编码**得新 x2r（误差随编码器同步演化），
+        再据此重算读头误差、再次收紧 W2/W1c——credit depth 放大且逐轮重算误差，
+        比盲目加大 recog_lr 稳定（对治 v5 在 lr>0.001 就发散的痛点）。
+        """
         cfg = self.cfg
         dev = self.device
         yoh = np.zeros(self.C, np.float32); yoh[y] = 1.0
         yoh_t = torch.as_tensor(yoh, device=dev)
-        self._recog_forward(x0_np)
-        x1r, x2r, x0rf = self._x1r, self._x2r, self._x1rf
-        # 1) 读头 LMS（判别真标签，同评估口径）
-        logit = torch.mv(self.W_out.t(), x2r) + self.b_out
-        p = torch.softmax(logit / cfg.readout_tau, dim=0)
-        err = p - yoh_t
-        self.W_out -= (cfg.readout_lr * torch.outer(x2r, err))
-        self.b_out -= (cfg.readout_lr * err)
-        # 2) 编码器局部收紧（CE 梯度经识别方向回送编码权重）
-        g2 = torch.mv(self.W_out, err)                    # (h) dL/dx2
-        #   W2（识别方向 W2T）：dW2 += η·outer(x1r, -g2) => W2T 产出朝降 CE
-        mask2 = (x2r > cfg.theta_syn).to(x2r.dtype)       # 结构稀疏（post 门控）
-        dW2 = torch.outer(x1r.reshape(-1), g2 * mask2)
-        self.W2 -= cfg.recog_lr * dW2
-        #   W1c（识别方向 W1cT）：dL/dx1 = W2·g2，逐块 outer(x0rf, -δ1)
-        g1 = torch.mv(self.W2, g2).reshape(self.W, self.per)
-        mask1 = (x1r > cfg.theta_syn).to(x1r.dtype)
-        dW1c = torch.einsum("bi,bj->bij", x0rf, g1 * mask1) * self.s1
-        self.W1c -= cfg.recog_lr * dW1c
-        # 正则/结构（同 _learn）：列归一 + pad 置零 + s1 尺度 + W1cT 同步
+        for _ in range(max(1, cfg.recog_rounds)):
+            self._recog_forward(x0_np)
+            x1r, x2r, x0rf = self._x1r, self._x2r, self._x1rf
+            # 1) 读头 LMS + 任务 crédit（linear 或 mlp，见 _ro_train）
+            g2 = self._ro_train(x2r, yoh_t)
+            # 1b) 识别自监督(读头无关重建) credit（v8），加权并入
+            if cfg.recog_ss:
+                g2 = g2 + cfg.recog_ss_amp * self._ss_credit(
+                    x2r, x0rf.reshape(-1))
+            # 1c) meta-PE：对收紧编码器的总 credit 做 RMS 归一化（抑制 EVPE）
+            if cfg.recog_g_norm:
+                nr = torch.linalg.vector_norm(g2)
+                g2 = (g2 / nr.clamp_min(1e-8)) * cfg.recog_g_rms
+            # 2) 编码器局部收紧（CE 梯度经识别方向回送编码权重）
+            mask2 = (x2r > cfg.theta_syn).to(x2r.dtype)   # 结构稀疏（post 门控）
+            dW2 = torch.outer(x1r.reshape(-1), g2 * mask2)
+            self.W2 -= cfg.recog_lr * dW2
+            g1 = torch.mv(self.W2, g2).reshape(self.W, self.per)
+            mask1 = (x1r > cfg.theta_syn).to(x1r.dtype)
+            dW1c = torch.einsum("bi,bj->bij", x0rf, g1 * mask1) * self.s1
+            self.W1c -= cfg.recog_lr * dW1c
+            # 正则/结构（同 _learn）：列归一 + pad 置零 + s1 尺度 + W1cT 同步
+            n = torch.linalg.vector_norm(self.W1c, dim=1, keepdim=True)
+            self.W1c = self.W1c / n.clamp_min(cfg.w1_norm_eps)
+            self.W1c[self.pad] = 0.0
+            self.W1c *= self.s1
+            self.W1cT = self.W1c.transpose(1, 2).contiguous()
+            self.W2 *= self.m2
+            self.W2 = _colnorm_t(self.W2)
+            self._maybe_cap_w2()
+        # 3) 生成侧同步（可选，recog_refine>0 时用识别态做少量生成收紧，作 W3 学力）
+        n_ = torch.linalg.vector_norm(self._e0c) if hasattr(self, "_e0c") else 0.0
+        return float(n_)
+
+    def train_step_recog_fg(self, x0_np: np.ndarray, y: int) -> float:
+        """Split-FG 局部 BP credit（v10，2026-09-10）。
+
+        与 recog(v5/v6) 的关键差异：credit 路径带**精确 relu' 门控**。recog 只用 post
+        激活的 theta_syn 阈值掩码 gating（缺 x2→x1 的 relu' 导数），故局部 credit 与 BP
+        有逐层偏置，无法闭合 0.33→0.42 孪生差距。Split-FG（Ren'23）分主干+头：头梯度
+        精确（g2 = W_out^T·(p−y)，_ro_train），主干 credit 用 relu'(pre) 门控的雅可比
+        向量积(JVP) 近似 BP：
+
+            pre2 = W2^T·x1, g2g = relu'(pre2)⊙g2      # dL/dpre2
+            dW2 ∝ x1 ⊗ g2g                            # 局部 outer
+            g1  = W2·g2g（共享权，x2→x1 方向）
+            pre1 = W1c^T·x0, g1g = relu'(pre1)⊙g1     # dL/dpre1
+            dW1c ∝ x0rf ⊗ g1g（逐块 outer）
+
+        即精确含 relu' 的两层 BP credit，完全局部/免反传（torch.no_grad）。结构稀疏
+        （k-WTA/事件）+ 列归一 + W2 谱界 + meta-PE 平衡保留；评估走 eval_recog。
+        """
+        cfg = self.cfg
+        dev = self.device
+        yoh = np.zeros(self.C, np.float32); yoh[y] = 1.0
+        yoh_t = torch.as_tensor(yoh, device=dev)
+        for _ in range(max(1, cfg.recog_rounds)):
+            self._recog_forward(x0_np)
+            x1r, x2r, x0rf = self._x1r, self._x2r, self._x1rf
+            # 1) 读头：head 梯度精确（_ro_train 返回 g2=dL/dx2；linear 或 mlp 口径）
+            g2 = self._ro_train(x2r, yoh_t)
+            # 2) 主干 Split-FG credit（relu' 门控）
+            pre2 = torch.mv(self.W2.t(), x1r.reshape(-1))          # (h)
+            g2g = g2 * (pre2 > 0.0).to(x2r.dtype)                  # dL/dpre2, relu'(pre2)
+            dW2 = torch.outer(x1r.reshape(-1), g2g)                # 局部 outer
+            self.W2 -= cfg.recog_lr * dW2
+            g1 = torch.mv(self.W2, g2g).reshape(self.W, self.per)  # dL/dx1 (共享 W2)
+            pre1 = (torch.matmul(self.W1cT, x0rf.unsqueeze(-1))
+                    .squeeze(-1) * self.s1)                        # (W, per)
+            g1g = g1 * (pre1 > 0.0).to(g1.dtype)                   # dL/dpre1, relu'(pre1)
+            dW1c = torch.einsum("bi,bj->bij", x0rf, g1g) * self.s1
+            self.W1c -= cfg.recog_lr * dW1c
+            # 3) 正则/结构（同 _learn/train_step_recog）：
+            n = torch.linalg.vector_norm(self.W1c, dim=1, keepdim=True)
+            self.W1c = self.W1c / n.clamp_min(cfg.w1_norm_eps)
+            self.W1c[self.pad] = 0.0
+            self.W1c *= self.s1
+            self.W1cT = self.W1c.transpose(1, 2).contiguous()
+            self.W2 *= self.m2
+            self.W2 = _colnorm_t(self.W2)
+            self._maybe_cap_w2()
+        n_ = torch.linalg.vector_norm(self._e0c) if hasattr(self, "_e0c") else 0.0
+        return float(n_)
+
+    def train_step_recog_adam(self, x0_np: np.ndarray, y: int) -> float:
+        """局部自适应矩训练（v12，2026-09-10）：幸存集 credit + 全局部 Adam。
+
+        诊断（h2_adam_probe）：v11(relu' pre 门控 + 保留 colnorm/谱界/m2/s1 重标) 在
+        1856 上 acc 恒 0.133、ev=0.0；h=256 探针显示 bpc 6.6→7.9 发散——把求和约束
+        (colnorm/w2cap) 与 Adam 逐坐标归一互斥，且 credit 用 (pre>0) 而非 kWTA 幸存集，
+        对"被 kWTA 抹掉但输入为正"的单元错误给 credit（≠真 BP 穿过 relu∘kWTA 的梯度）。
+        oracle(h2_oraclebp_1856)证明：同前馈(relu→clamp→kWTA) + **真自动微分** BP + 纯
+        Adam(无 colnorm/谱界) → 90k acc0.367 / 180k 0.373，追平孪生，与前馈结构无关。
+
+        v12 逐位对齐 oracle 的更新量，但全部走【逐突触局部 Adam】(免 autograd/无全局)：
+            幸存集 gate = (前馈存活单元>0)，credit = BP 穿过 relu∘kWTA 的 straight-through
+            pre2=W2^T·x1, g2g = (W_out^T·(p-y)) ⊙ [x2r>0]     dW2 = x1 ⊗ g2g
+            g1 = W2·g2g, pre1=W1c^T·x0, g1g = g1 ⊙ [x1r>0]    dW1c = x0rf ⊗ g1g
+            dW_out = x2r ⊗ (p-y),  db_out = (p-y)
+        四个张量(W1c/W2/W_out/b_out)各自独立局部 Adam（每突触 m/v，def bias-correction），
+        正则仅保留块紧凑 pad 掩码(=oracle 的 enforce_block)；不再做 colnorm/谱界/m2/s1
+        重标定（与 orce oracle 一致，避免求和约束与 Adam 互斥导致塌缩/发散）。
+        """
+        cfg = self.cfg
+        dev = self.device
+        yoh = np.zeros(self.C, np.float32); yoh[y] = 1.0
+        yoh_t = torch.as_tensor(yoh, device=dev)
+        # 惰性建局部 Adam 状态（形状权值同源；四张量全部局部优化对齐 oracle 纯 Adam）
+        if getattr(self, "_adams", None) is None:
+            self._adams = {}
+            for k in ("W1c", "W2", "W_out", "b_out"):
+                P = getattr(self, k)
+                self._adams[k] = {"m": torch.zeros_like(P),
+                                  "v": torch.zeros_like(P),
+                                  "t": 0}
+        for _ in range(max(1, cfg.recog_rounds)):
+            self._recog_forward(x0_np)                     # x1r/x2r/x0rf（已 relu+clamp+kWTA）
+            x1r, x2r, x0rf = self._x1r, self._x2r, self._x1rf
+            # ---- 读头直通 + 任务 credit（p−y，线性读头同 oracle）----
+            logit = torch.mv(self.W_out.t(), x2r) + self.b_out
+            p = torch.softmax(logit / cfg.readout_tau, dim=0)
+            err = p - yoh_t                                 # (C)
+            dW_out = torch.outer(x2r, err)                  # (h,C)
+            db_out = err                                    # (C)
+            g2 = torch.mv(self.W_out, err)                  # (h) dL/dx2
+            # ---- 主干 credit：survivor 集 straight-through（真 BP 穿过 relu∘kWTA）----
+            g2g = g2 * (x2r > 0.0).to(x2r.dtype)            # [x2r>0] == kWTA 存活列
+            dW2 = torch.outer(x1r.reshape(-1), g2g)         # (W·per, h)
+            g1 = torch.mv(self.W2, g2g).reshape(self.W, self.per)
+            g1g = g1 * (x1r > 0.0).to(g1.dtype)             # [x1r>0] 存活块
+            dW1c = torch.einsum("bi,bj->bij", x0rf, g1g) * self.s1
+            # ---- 逐突触局部 Adam（四张量独立；等同 oracle 的 per-param Adam）----
+            b1, b2, eps, lr = (cfg.recog_adam_b1, cfg.recog_adam_b2,
+                               cfg.recog_adam_eps, cfg.recog_adam_lr)
+            for name, P, G in (("W_out", self.W_out, dW_out),
+                               ("b_out", self.b_out, db_out),
+                               ("W2", self.W2, dW2),
+                               ("W1c", self.W1c, dW1c)):
+                st = self._adams[name]
+                st["t"] += 1
+                mh = st["m"].mul_(b1).add_(G, alpha=1 - b1) / (1 - b1 ** st["t"])
+                vh = st["v"].mul_(b2).add_(G * G, alpha=1 - b2) / (1 - b2 ** st["t"])
+                P -= lr * mh / (torch.sqrt(vh) + eps)
+            # ---- 仅块紧凑 pad 掩码（同 oracle enforce_block；不做其他求和正则）----
+            self.W1c[self.pad] = 0.0
+            self.W1cT = self.W1c.transpose(1, 2).contiguous()
+        n_ = torch.linalg.vector_norm(self._e0c) if hasattr(self, "_e0c") else 0.0
+        return float(n_)
+
+    def train_step_dpc2(self, x0_np: np.ndarray, y: int) -> float:
+        """完全判别式 PC 训练（µPC/Meta-PCN 风格，v9，2026-09-10）。
+
+        与 v3-DPC 的关键差异：**从识别前馈态非零启动**（非从零沉降），并在判别能量
+            E = ½||x2−relu(W2^T x1)||² + ½||x1−relu(W1c^T x0)||² + λ·CE(W_out x2)
+        下用 relu 门控完整 credit 沉降 K 步（µP 收缩步长，见 eta_inf_scl），得到判别
+        沉降态 x1*,x2*；随后【预测沉降目标】(target propagation) + meta-PE RMS 平衡，
+        把类别判别目标下沉到识别权重：ΔW2 ∝ (x2*−relu(W2^T x1))⊛relu'·x1，ΔW1c 同，
+        等价逐层吸收 BP 全局 credit。读头在沉降 x2* 上 LMS。评估走 eval_recog。
+        """
+        cfg = self.cfg
+        dev = self.device
+        yoh = np.zeros(self.C, np.float32); yoh[y] = 1.0
+        yoh_t = torch.as_tensor(yoh, device=dev)
+        self._recog_forward(x0_np)                     # 得 x1f,x2f 作为沉降初始
+        x0rf = self._x1rf
+        x1 = self._x1r.clone()                          # (W, per) 前馈识别态
+        x2 = self._x2r.clone()                          # (h)
+        W1cT, W2, Wout, bout = self.W1cT, self.W2, self.W_out, self.b_out
+        tau = cfg.readout_tau
+        th = cfg.theta_event
+        et2e = self.et2 * cfg.eta_inf_scl               # µP 收缩步长
+        et1 = self.et1
+        be = cfg.beta
+        # ---- 判别能量沉降（relu 门控全 credit，前馈非零启动）----
+        for _ in range(cfg.dpc2_settle):
+            logit = torch.mv(Wout.t(), x2) + bout
+            err = torch.softmax(logit / tau, 0) - yoh_t      # (C)
+            gg = torch.mv(Wout, err)                          # (h) dL_CE/dx2
+            pre2 = torch.mv(W2.t(), x1.reshape(-1))           # (h) 识别预激活
+            x2pred = pre2.clamp(0.0, cfg.x_max)
+            r2 = x2 - x2pred                                  # 识别残差@x2
+            u2 = (-be * r2 - cfg.dpc2_amp * gg)
+            x2 = (x2 + et2e * u2 * (u2.abs() > th)).clamp(0.0, cfg.x_max)
+            pre1 = torch.matmul(W1cT, x0rf.unsqueeze(-1)).squeeze(-1) * self.s1
+            x1pred = pre1.clamp(0.0, cfg.x_max)
+            r1 = x1 - x1pred                                  # 识别残差@x1
+            gate2 = (pre2 > 0.0).to(x2.dtype)                 # relu'(pre2)
+            back = torch.mv(W2, r2 * gate2).reshape(self.W, self.per)
+            u1 = (-be * r1 + cfg.dpc2_back * back)
+            x1 = (x1 + et1 * u1 * (u1.abs() > th)).clamp(0.0, cfg.x_max)
+            if cfg.kwta_every_iter:
+                x1 = _kwta2d_t(x1, cfg.kwta_frac)
+                x2 = _kwta_t(x2, cfg.kwta_frac)
+        x1 = _kwta2d_t(x1, cfg.kwta_frac)
+        x2 = _kwta_t(x2, cfg.kwta_frac)
+        self._x1r, self._x2r = x1, x2
+        self._ev_recog = (x2 > cfg.theta_syn).float().mean().item()
+        # ---- 读头 LMS 于沉降 x2* ----
+        self._ro_train(x2, yoh_t)                       # 线性读头，本地 LMS
+        # ---- 预测沉降目标：把判别目标下沉到识别权重（meta-PE 平衡）----
+        pre2 = torch.mv(W2.t(), x1.reshape(-1))          # 用沉降 x1 重算
+        delta2 = (x2 > 0.0).to(x2.dtype) * (x2 - pre2.clamp(0.0, cfg.x_max))
+        nr = torch.linalg.vector_norm(delta2)
+        delta2 = (delta2 / nr.clamp_min(1e-8)) * cfg.recog_g_rms
+        dW2 = torch.outer(x1.reshape(-1), delta2)        # ΔW2 ∝ (x2*−relu(W2^T x1))⊗x1
+        self.W2 += cfg.recog_lr * dW2
+        pre1 = torch.matmul(W1cT, x0rf.unsqueeze(-1)).squeeze(-1) * self.s1
+        delta1 = (x1 > 0.0).to(x1.dtype) * (x1 - pre1.clamp(0.0, cfg.x_max))
+        nr1 = torch.linalg.vector_norm(delta1)
+        delta1 = (delta1 / nr1.clamp_min(1e-8)) * cfg.recog_g_rms
+        dW1c = torch.einsum("bi,bj->bij", x0rf, delta1) * self.s1
+        self.W1c += cfg.recog_lr * dW1c
+        # ---- 正则/结构（同 train_step_recog）----
         n = torch.linalg.vector_norm(self.W1c, dim=1, keepdim=True)
         self.W1c = self.W1c / n.clamp_min(cfg.w1_norm_eps)
         self.W1c[self.pad] = 0.0
@@ -605,7 +892,6 @@ class LMPCNg:
         self.W2 *= self.m2
         self.W2 = _colnorm_t(self.W2)
         self._maybe_cap_w2()
-        # 3) 生成侧同步（可选，recog_refine>0 时用识别态做少量生成收紧，作 W3 学力）
         n_ = torch.linalg.vector_norm(self._e0c) if hasattr(self, "_e0c") else 0.0
         return float(n_)
 
@@ -616,7 +902,7 @@ class LMPCNg:
         nll = acc = 0.0
         for i in range(len(y_np)):
             self._recog_forward(X_np[i].ravel())
-            logit = torch.mv(self.W_out.t(), self._x2r) + self.b_out
+            logit = self._ro_infer(self._x2r)
             p = torch.softmax(logit / tau, dim=0)
             py = float(p[y_np[i]])
             nll -= np.log2(max(py, 1e-12))
