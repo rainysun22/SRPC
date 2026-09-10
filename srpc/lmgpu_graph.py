@@ -135,6 +135,30 @@ class LMPCNgG(LMPCNg):
         err = p - self._yohb          # == p − one_hot(y)，可捕获（无标量索引）
         self.W_out.add_(-(cfg.readout_lr * torch.outer(x2, err)))
         self.b_out.add_(-(cfg.readout_lr * err))
+        # ---- H2 对因修复：CE 判别耦合进编码器（仅 ce_amp>0 生效）----
+        # g2_ce = W_outᵀ·err ∈ R^h：读出头在 free x2 上的分类误差方向。
+        # W2 += η·outer(x1, g2_ce)，W1c += η·(pos)outer(x0rf, g1_ce)，
+        # 把类别判别写进占算力大头的 X0→X1→X2 编码通路，使 free x2 更可分。
+        ce = cfg.ce_amp
+        if ce > 0.0:
+            g2_ce = torch.mv(self.W_out, err)
+            W2.add_(self.eta_w2 * ce * torch.outer(x1g.reshape(-1), g2_ce))
+            W2.mul_(self.m2)
+            W2.div_(torch.linalg.vector_norm(W2, dim=0, keepdim=True)
+                    .clamp_min(1e-8))
+            g1_ce = torch.mv(W2.t(), g2_ce).reshape(self.W, self.per)
+            W1c.add_(self.eta_w1 * ce
+                     * torch.einsum("wi,wj->wij", x0rf, g1_ce))
+            n1 = torch.linalg.vector_norm(W1c, dim=1, keepdim=True)
+            if cfg.w1_norm == "unit":
+                W1c.div_(n1.clamp_min(cfg.w1_norm_eps))
+            else:
+                n1s = torch.where(n1 > 1.0, 1.0 / n1.clamp_min(1e-12),
+                                  torch.ones_like(n1))
+                W1c.mul_(n1s)
+            W1c.masked_fill_(self.pad.unsqueeze(-1), 0.0)
+            W1c.mul_(self.s1)
+            self.W1cT.copy_(W1c.transpose(1, 2))
 
     def _capture(self) -> None:
         n_in = self.W * 256 + 1

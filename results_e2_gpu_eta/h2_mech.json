@@ -1,0 +1,34 @@
+{
+ "h": 1856,
+ "ckpt": "/root/srpc_e2/srpc_src/results_e2_gpu_fix/pcn_1856_fix.pt",
+ "rows": {
+  "free_x2": {
+   "acc": 0.275,
+   "bpc": 7.747,
+   "wall": 92.7
+  },
+  "clamp_x2": {
+   "acc": 1.0,
+   "bpc": 6.578,
+   "wall": 76.6
+  },
+  "free_x3_argmax": {
+   "acc": 0.0833,
+   "wall": 4.4
+  },
+  "free_x2_it1": {
+   "acc": 0.1333,
+   "wall": 16.0
+  },
+  "free_x2_it3": {
+   "acc": 0.2567,
+   "wall": 30.5
+  },
+  "free_x2_it6": {
+   "acc": 0.2517,
+   "wall": 50.8
+  }
+ },
+ "twin_acc": 0.49166666666666664,
+ "twin_bpc": 2.4198176860809326
+}

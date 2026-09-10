@@ -252,6 +252,147 @@ class LMPCNg:
         self.b_out -= (cfg.readout_lr * err)
         return float(torch.linalg.vector_norm(self._e0c))
 
+    def train_step_ss(self, x0_np: np.ndarray, y: int) -> float:
+        """scheduled-sampling 在线训练（H2 对因修复 v2）。
+
+        先短自由推断得开环预测 p̂，钳制目标 t3=(1-ε)yoh+ε·p̂，clamp 推断与 W3
+        学习都用 t3，使生成映射(x2→next-byte)与开环读出一致，缓解 teacher
+        -forcing→free 塌陷。ε=cfg.ss_eps；0 时退化为原 train_step 行为。
+        """
+        cfg = self.cfg
+        ss = cfg.ss_eps
+        yoh = np.zeros(self.C, np.float32); yoh[y] = 1.0
+        yoh_t = torch.as_tensor(yoh, device=self.device)
+        # 1) 短自由推断得开环预测 p̂（复用给读出头）
+        self._infer(x0_np, None, clamp=False, iters=cfg.readout_iters)
+        x2f = self._x2
+        logit = torch.mv(self.W_out.t(), x2f) + self.b_out
+        p = torch.softmax(logit / cfg.readout_tau, dim=0)
+        target_np = yoh
+        if ss > 0.0:
+            t3 = (1.0 - ss) * yoh_t + ss * p
+            target_np = t3.cpu().numpy().astype(np.float32)
+        # 2) 用混合目标钳制推断（塑造 x2 为开环可达的判别态）
+        self._infer(x0_np, target_np, clamp=True, iters=self.iters)
+        self._learn(target_np)
+        self._maybe_cap_w2()
+        # 3) 读出头 LMS（判别真标签，基于自由 x2）
+        err = p - yoh_t
+        self.W_out -= (cfg.readout_lr * torch.outer(x2f, err))
+        self.b_out -= (cfg.readout_lr * err)
+        return float(torch.linalg.vector_norm(self._e0c))
+
+    # ---- 批量累积局部更新（H2 对因修复，2026-09-10）----
+    # 根因（h2_conv 诊断）：SR-PC 在线单样本 Hebbian vs 孪生 batch=32+Adam，
+    #  同样本数下相差甚大（1856@300k：acc 0.258/bpc 4.1 vs 孪生 0.42/更好）。
+    #  收敛效率代差，非数据量差、非读出判别不足（CE 耦合 300k 验证无效，已弃）。
+    # 文献：成批预测编码收敛至 BP（Salvatori et al.; Ha et al. ICLR'26 Meta-PCN）；
+    #  E1 规划 F 阶段"记忆回放 -> batch 等效"（慢记忆/睡眠回放）。
+    # 修复：把 B 个样本的 PC 误差外积（∂F/∂W = e_l ⊗ pre_l）批量累积并取平均，
+    #  仍为局部规则、免反传、结构稀疏 + 列归一 + W2 谱截断全保留。B=32 与孪生同预算。
+    @staticmethod
+    def _bkwta_1d(x: torch.Tensor, frac: float) -> torch.Tensor:
+        n = x.shape[1]
+        k = max(1, int(round(frac * n)))
+        if k >= n:
+            return x
+        vals, idx = torch.topk(x, k, dim=1)
+        out = torch.zeros_like(x)
+        out.scatter_(1, idx, vals)
+        return out
+
+    def _infer_batch(self, x0_np: np.ndarray, yoh_np: np.ndarray | None,
+                     clamp: bool, iters: int) -> tuple:
+        """批量推断 x0:(B,W,256) 或 (B, W*256)；yoh_np 仅 clamp 用。返回
+        (x1g, x2, x3b, e0c, e1, e2, g1, g2)；x3 最后迭代的 e2 用于学习。"""
+        cfg = self.cfg
+        a, b_ = cfg.alpha, cfg.beta
+        B = x0_np.shape[0]
+        dev = self.device
+        x0f = np.concatenate([np.asarray(x0_np).reshape(B, -1),
+                              np.zeros((B, 1), np.float32)], axis=1)
+        x0b = torch.as_tensor(np.ascontiguousarray(x0f), device=dev)   # (B, 4097)
+        x0rf = x0b[:, self.idx_rf]                                     # (B, W, per)
+        x1g = torch.zeros((B, self.W, self.per), dtype=torch.float32, device=dev)
+        x2 = torch.zeros((B, self.h), dtype=torch.float32, device=dev)
+        if clamp:
+            x3b = torch.as_tensor(np.ascontiguousarray(yoh_np), device=dev)
+        else:
+            x3b = torch.zeros((B, self.C), dtype=torch.float32, device=dev)
+        W1c, W1cT, W2, W3 = self.W1c, self.W1cT, self.W2, self.W3
+        scl = cfg.eta_inf_scl if not clamp else 1.0
+        et2_e = self.et2 * scl
+        eta_out_e = cfg.eta_out * scl
+        th = cfg.theta_event
+        for _ in range(iters):
+            pred0 = torch.einsum("hpq,bhq->bhp", W1c, x1g)
+            e0c = x0rf - pred0                       # (B,W,per)
+            x1 = x1g.reshape(B, -1)
+            e1 = x1 - x2 @ W2.t()                    # (B,h)
+            e2 = x2 - x3b @ W3.t()                   # (B,h)
+            u1 = b_ * (torch.einsum("hpq,bhq->bhp", W1cT, e0c) * self.s1) \
+                - a * e1.reshape(B, self.W, self.per)
+            u2 = b_ * (e1 @ W2) - a * e2
+            g1 = u1.abs() > th
+            g2 = u2.abs() > th
+            x1g = (x1g + self.et1 * u1 * g1).clamp(0.0, cfg.x_max)
+            x2 = (x2 + et2_e * u2 * g2).clamp(0.0, cfg.x_max)
+            if not clamp:
+                e2 = x2 - x3b @ W3.t()
+                x3b = (x3b + eta_out_e * (e2 @ W3)).clamp(0.0, 1.0)
+        x1g = self._bkwta_1d(x1g.reshape(B, -1), cfg.kwta_frac).reshape(
+            B, self.W, self.per)
+        x2 = self._bkwta_1d(x2, cfg.kwta_frac)
+        return x1g, x2, x3b, e0c, e1, e2, g1, g2
+
+    def train_step_batch(self, X_np: np.ndarray, y_np: np.ndarray) -> None:
+        """批量累积局部更新（B 样本 PC 误差外积取平均后应用一次）。"""
+        cfg = self.cfg
+        X_np = np.asarray(X_np)
+        y_np = np.asarray(y_np)
+        B = X_np.shape[0]
+        dev = self.device
+        yoh = np.zeros((B, self.C), np.float32)
+        yoh[np.arange(B), y_np] = 1.0
+        yoh_t = torch.as_tensor(yoh, device=dev)
+        # ---- 钳制信用分配（batch=32 同孪生学力）----
+        x1g, x2, _x3, e0c, e1, e2, g1, g2 = self._infer_batch(
+            X_np, yoh, clamp=True, iters=self.iters)
+        g1s = (x1g > cfg.theta_syn).to(x1g.dtype)
+        g2s = (x2 > cfg.theta_syn).to(x2.dtype)
+        dW1 = torch.einsum("bhi,bhj->hij", e0c, x1g * g1s) * self.s1 / B
+        dW2 = torch.einsum("bh,bs->hs", e1, x2 * g2s) / B
+        dW3 = torch.einsum("bh,bc->hc", e2, yoh_t) / B
+        self.W1c += self.eta_w1 * dW1
+        n1 = torch.linalg.vector_norm(self.W1c, dim=1, keepdim=True)
+        scale = torch.where(n1 > 1.0, 1.0 / n1.clamp_min(1e-12),
+                            torch.ones_like(n1))
+        self.W1c *= scale
+        self.W1c[self.pad] = 0.0
+        self.W1c *= self.s1
+        self.W1cT = self.W1c.transpose(1, 2).contiguous()
+        self.W2 += self.eta_w2 * dW2
+        self.W3 += self.eta_w3 * dW3
+        self.W2 *= self.m2
+        self.W3 *= self.m3
+        self.W2 = _colnorm_t(self.W2)
+        n3 = torch.linalg.vector_norm(self.W3, dim=0)
+        cap = cfg.w3_norm_cap
+        over = n3 > cap
+        self.W3[:, over] *= (cap / n3[over].clamp_min(1e-8))
+        self._maybe_cap_w2()
+        # ---- 读出头（自由推断 x2 + LMS，batch 平均）----
+        x1g, x2f, _x3f, *_ = self._infer_batch(
+            X_np, None, clamp=False, iters=cfg.readout_iters)
+        logit = x2f @ self.W_out + self.b_out
+        p = torch.softmax(logit / cfg.readout_tau, dim=1)
+        err = p - torch.as_tensor(yoh, device=dev)
+        self.W_out += -(cfg.readout_lr * torch.einsum("bh,bc->hc", x2f, err)) / B
+        self.b_out += -(cfg.readout_lr * err.mean(dim=0))
+        # 事件率 EMA（诊断）
+        self._ev = self._ev + ((g1.float().mean() + g2.float().mean()) * 0.5
+                               - self._ev) * 0.01
+
     # ---- 冻结评估：W_out 线性读出头（同 numpy 协议）----
     def eval_batch(self, X_np: np.ndarray, y_np: np.ndarray, tau: float,
                    block_mask: np.ndarray | None = None

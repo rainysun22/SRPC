@@ -457,6 +457,30 @@ class E2Config:
     readout_lr: float = 0.05          # 读出头 LMS 学习率
     readout_tau: float = 0.1          # 读出头训练温度（自由推断 x2 判分）
     readout_iters: int = 8            # 读出头自由推断浅迭代（省算力，评估深迭代）
+    # H2 对因修复：CE 判别耦合进编码器（2026-09-10）
+    # 根因（h2_diag_mech）：free x2 线性可读 acc 仅 ~0.28 vs 孪生 0.49；clamp_x2 1.0
+    #  是标签注入的平凡读。孪生=BP，CE 反向把类别信号打进全部特征；SR-PC 的输入
+    #  编码器（W1/W2）只在"钳制标签注入类别信息后"间接受类别影响，开环(free)表征
+    #  类别可分不足。对应文献：判别式 PC 解钳自由读出低于 BP softmax（Cacioli 2026）；
+    #  teacher-forcing→free 泛化塌陷（scheduled sampling/DAgger 族）。
+    # 修复：把读出头在 free x2 上的分类(CE)误差经局部误差路径回送 W1/W2——
+    #   g2_ce = W_outᵀ·err（R^h），W2 += η·outer(x1, g2_ce)；
+    #   g1_ce = W2ᵀ·g2_ce（R^{W·per}），W1c += η·ε(pos) outer(x0rf, g1_ce)，
+    #  仍保持局部（post-类别误差 × pre-激活）、免反传、图内确定性可捕获。
+    #  语义 = 把类别判别直接写进占算力大头的编码器，使 free x2 更可分。
+    #  0 = 关闭（旧模型/旧行为逐位不变）。
+    ce_amp: float = 0.0               # CE→编码器耦合强度（0 关；先经 300k 有界挡扫优）
+    # H2 对因修复 v2：scheduled sampling（2026-09-10）
+    # 诊断（h2_mech）：clamp_x2 探针 1.0 vs free_x2 探针 0.28——类别信息只能靠注入
+    #  教师标签进入，开环(free)推断即丢。CE 判别耦合(300k 验证无效) 与 batch 累积
+    #  (300k 验证更差，acc 卡 0.133) 均失败，确证根因 = teacher-forcing→free 泛化塌陷。
+    # 文献：scheduled sampling（Bengio et al. 2015）/ DAgger（Ross et al.）/
+    #  "learning the target" vid-PC（Salvatori et al.）——让钳制目标 = 真值与模型自身
+    #  开环预测的凸混合，x2 被拉向"开环可达"的判别态，free 表征类别可分性随之上升。
+    # 修复：online 单样本（保持稳定 0.258 轨迹）训练期，先短自由推断得 p̂，
+    #  钳制目标 t3 = (1-ss_eps)·yoh + ss_eps·p̂，clamp 推断与 W3 学习都用 t3，
+    #  使生成映射（x2→next-byte）与开环读出一致。0 = 关（旧行为逐位不变）。
+    ss_eps: float = 0.0               # scheduled-sampling 混合权重（0 纯教师；先有界挡扫优）
     # 学习（锚点值）
     eta_w: float = 0.005               # 锚点网格 {0.005,0.01} 裁定（探针：0.005@24iters 最优）
     theta_syn: float = 1e-2
