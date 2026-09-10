@@ -1,0 +1,56 @@
+{
+ "rows": [
+  {
+   "h": 768,
+   "step": 1039838,
+   "w2_smax": 3.18,
+   "selfhead_acc": 0.25,
+   "selfhead_bpc": 6.414,
+   "x2_active": 0.5,
+   "x2_amp": 0.038,
+   "wall": 5.5
+  },
+  {
+   "h": 1200,
+   "step": 1039838,
+   "w2_smax": 3.73,
+   "selfhead_acc": 0.2567,
+   "selfhead_bpc": 6.421,
+   "x2_active": 0.5,
+   "x2_amp": 0.031,
+   "wall": 5.7
+  },
+  {
+   "h": 1856,
+   "step": 1039838,
+   "w2_smax": 5.03,
+   "selfhead_acc": 0.285,
+   "selfhead_bpc": 6.498,
+   "x2_active": 0.421,
+   "x2_amp": 0.02,
+   "wall": 7.0
+  },
+  {
+   "h": 2832,
+   "step": 1039838,
+   "w2_smax": 5.03,
+   "selfhead_acc": 0.29,
+   "selfhead_bpc": 6.544,
+   "x2_active": 0.441,
+   "x2_amp": 0.016,
+   "wall": 9.9
+  },
+  {
+   "h": 4032,
+   "step": 1039838,
+   "w2_smax": 5.01,
+   "selfhead_acc": 0.2933,
+   "selfhead_bpc": 6.551,
+   "x2_active": 0.491,
+   "x2_amp": 0.012,
+   "wall": 15.0
+  }
+ ],
+ "selfhead_acc_monotonic": true,
+ "note": "freeze \u2192 \u6536\u655b\u6001 x2 \u2192 \u6a21\u578b\u56fa\u6709 W_out/b_out \u81ea-\u8bfb\u51fa\u5934 next-byte acc/BPC\uff1b\u6743\u91cd\u53e3\u5f84=\u6700\u4f18\u5065\u5eb7\u6863(768/1200 \u767b\u9876\u30011856 fix\u30012832/4032 eta1)\uff1b\u82e5\u5355\u8c03\u800c\u5916\u7f6e\u63a2\u9488\u4e0d\u5355\u8c03\u2192\u8bfb\u51fa\u89e3\u79bb\u4e3a\u5916\u7f6e\u8bfb\u51fa\u53e3\u4f2a\u5f71\uff0cH1 \u4ee5\u81ea-\u8bfb\u51fa-\u5bbd\u5ea6\u53e3\u5f84\u4fee\u6b63"
+}

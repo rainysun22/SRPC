@@ -1,0 +1,29 @@
+{
+ "probe_n": 12000,
+ "ridge_lambda": 0.001,
+ "epochs": 50,
+ "patience": 8,
+ "rows": [
+  {
+   "h": 2832,
+   "linear": 0.255,
+   "mlp2_wce": 0.0717,
+   "mlp_best_val": 0.0927,
+   "mlp_best_ep": 19,
+   "wall": 196.1
+  },
+  {
+   "h": 4032,
+   "linear": 0.2517,
+   "mlp2_wce": 0.095,
+   "mlp_best_val": 0.106,
+   "mlp_best_ep": 15,
+   "wall": 189.5
+  }
+ ],
+ "monotonic": {
+  "linear": false,
+  "mlp2_wce": true
+ },
+ "note": "\u5347\u7ea7\u8bfb\u51fa\u53e3\uff1a\u7c7b\u9006\u9891\u7387\u52a0\u6743 CE\uff08\u4fee MLP \u574d\u7f29\uff09+ \u5bb9\u91cf\u968f\u5bbd\u5ea6\u7f29\u653e\uff08hidden \u221d h\uff09\u3002\u82e5 mlp2_wce \u968f\u5bbd\u5ea6\u5355\u8c03 \u2192 \u539f\u975e\u7ebf\u6027\u627f\u8f7d\u5931\u8d25\u5b9e\u4e3a\u8bfb\u51fa\u53e3\u5bb9\u91cf/\u7c7b\u4e0d\u5747\u8861\u4f2a\u5f71\uff0cH1 \u53bb\u89e3\u79bb\u5316\uff1b\u82e5\u4ecd\u4e0d\u5355\u8c03 \u2192 \u5750\u5b9e\u8bfb\u51fa\u53e3\u4e0d\u53ef\u63a5\u89e6\uff0c\u8fdb\u8c03\u7814\u5faa\u73af\u3002"
+}
