@@ -109,7 +109,10 @@ class LMPCNg:
     def _infer(self, x0_flat_np: np.ndarray, yoh_np: np.ndarray | None,
                block_mask: np.ndarray | None = None,
                clamp: bool = False, iters: int | None = None,
-               free_out: bool | None = None) -> None:
+               free_out: bool | None = None,
+               dpc_amp: float = 0.0,
+               dpc_deep: float = 0.0,
+               cls_yoh: torch.Tensor | None = None) -> None:
         cfg = self.cfg
         a, b_ = cfg.alpha, cfg.beta
         dev = self.device
@@ -144,6 +147,17 @@ class LMPCNg:
             u1 = b_ * u1.reshape(self.W, self.per) - a * e1.reshape(
                 self.W, self.per)
             u2 = b_ * torch.mv(W2.t(), e1) - a * e2
+            if dpc_amp > 0.0 and cls_yoh is not None:
+                # DPC：把 CE 类别回归误差并入沉降，每步软性推 x2 靠向正确类。
+                # u 含 −∂L_CE/∂x2 = −W_out^T(p−y)，减小 CE（公开：Whittington/Bogacz 判别 PC）
+                logit = torch.mv(self.W_out.t(), x2) + self.b_out
+                push = torch.softmax(logit / cfg.readout_tau, dim=0) - cls_yoh
+                gg = torch.mv(self.W_out, push)                    # (h) dL/dx2
+                u2 = u2 - dpc_amp * gg
+                if dpc_deep > 0.0:
+                    # 充分监督 PC：类别梯度下沉到 x1（dL/dx1 = W2^T·dL/dx2），
+                    # 直达编码瓶颈 W1，使自由沉降学出判别 x1 → 判别 x2
+                    u1 = u1 - (dpc_deep * torch.mv(W2.t(), gg)).reshape(self.W, self.per)
             g1 = u1.abs() > th
             g2 = u2.abs() > th
             x1g = (x1g + self.et1 * u1 * g1).clamp(0.0, cfg.x_max)
@@ -282,7 +296,139 @@ class LMPCNg:
         self.b_out -= (cfg.readout_lr * err)
         return float(torch.linalg.vector_norm(self._e0c))
 
-    # ---- 批量累积局部更新（H2 对因修复，2026-09-10）----
+    def train_step_free(self, x0_np: np.ndarray, y: int) -> float:
+        """H2 对因修复 v3：自由沉降输出误差 PC（2026-09-10）。
+
+        根因（h2_layerprobe + h2_freebeta，均决定性）：硬 clamp 标签污染状态——
+        训练时把 x3=yoh 钳死沉降，W1/W2 只学会解读"标签污染态"，自由沉降从 x1 起
+        即塌陷（clamp 探针 1.0 vs free x1 0.32 / free x2 0.24）；放大自底向上 β 探针
+        单调降（0.242→0.117）证伪"传导力度不足"。标签经硬 clamp 注入只塑造生成
+        轨迹、开环无判别。
+
+        修复：不再硬钳制。单样本训练【先自由沉降】得开环态 x2/free x1，读出头在其
+        上 LMS（同基线、同评估口径），再经局部读头把类别误差作为【软误差】回送编码
+        器：g2 = W_out·err 单步 nudge x2（x2n），以 x2n 为生成目标重建 e1n 更新
+        W1/W2、并以标签为目标更新 W3（e2n = x2n − W3·yoh）。类别信号只在自由态上
+        以软误差进入、不经硬钳制污染隐层静态，迫使 W1/W2 学会开环判别。
+
+        控制：cfg.free_nudge；0 时退化为原 clamp train_step 行为（即对照基线）。
+        仍为局部规则、免反传、结构稀疏 + 列归一 + W2 谱截断全保留。
+        """
+        cfg = self.cfg
+        yoh = np.zeros(self.C, np.float32); yoh[y] = 1.0
+        yoh_t = torch.as_tensor(yoh, device=self.device)
+        # 1) 自由沉降（不钳制）
+        self._infer(x0_np, None, clamp=False, iters=cfg.free_iters)
+        # 2) 读出头 LMS（自由 x2，判别真标签）——与评估口径一致
+        x2 = self._x2
+        logit = torch.mv(self.W_out.t(), x2) + self.b_out
+        p = torch.softmax(logit / cfg.readout_tau, dim=0)
+        err = p - yoh_t
+        self.W_out -= (cfg.readout_lr * torch.outer(x2, err))
+        self.b_out -= (cfg.readout_lr * err)
+        if cfg.free_nudge <= 0.0:
+            # 对照：退回原 clamp 生成式训练 + W2 谱截断
+            self._infer(x0_np, yoh, clamp=True, iters=self.iters)
+            self._learn(yoh)
+            self._maybe_cap_w2()
+        else:
+            x0rf = self._reduced_input(x0_np)
+            self._train_encoder_free(x0rf, yoh_t)
+            self._maybe_cap_w2()
+        return float(torch.linalg.vector_norm(self._e0c))
+
+    def train_step_dpc(self, x0_np: np.ndarray, y: int) -> float:
+        """H2 对因修复 v4：判别式 PC 能量训练（DPC，2026-09-10）。
+
+        诊断（h2_free_sweep，决定性）：自由沉降训练(free_nudge)三档逐字节同值
+        0.133 << clamp 基线 0.23——标签只在沉降【外】事后 nudge，沉降动力学全程无
+        类别误差，W 学不到开环判别，自由态坍缩到固定点。
+
+        v4 修复（dpc_amp>0）：把 CE 标签回归误差作为能量一项，放入【自由沉降内部】
+        每步的 x2 更新（−∂L_CE/∂x2 = −W_out^T(p−y)），软性把 x2 推向正确类；让
+        W1/W2 在开环沉降路径下也学到判别编码。沉降后读头 LMS（同评估口径）、局部
+        学习 _learn(yoh) 更新编码器（W1c/W2/W3）。类别信号连续进入沉降动力学，既不
+        硬钳制污染状态、也非事后无效（区别于 v3 nudge）。0=关（dpc_amp=0 走原 clamp
+        训练即对照）。仍为局部规则、免反传、结构稀疏+列归一+W2 谱截断全保留。
+        """
+        cfg = self.cfg
+        yoh = np.zeros(self.C, np.float32); yoh[y] = 1.0
+        if cfg.dpc_amp <= 0.0:
+            # 对照：原 clamp 生成式训练 + W2 谱截断
+            yoh_t = torch.as_tensor(yoh, device=self.device)
+            self._infer(x0_np, yoh_t.numpy() if False else yoh, clamp=True,
+                        iters=self.iters)
+            self._learn(yoh)
+            self._maybe_cap_w2()
+            return float(torch.linalg.vector_norm(self._e0c))
+        yoh_t = torch.as_tensor(yoh, device=self.device)
+        # 1) 自由沉降 + 沉降内 CE 类别推入（软性，非硬钳制）
+        self._infer(x0_np, None, clamp=False, iters=cfg.free_iters,
+                    dpc_amp=cfg.dpc_amp, dpc_deep=cfg.dpc_deep,
+                    cls_yoh=yoh_t)
+        # 2) 读头 LMS（自由 x2，判别真标签）——与评估口径一致
+        x2 = self._x2
+        logit = torch.mv(self.W_out.t(), x2) + self.b_out
+        p = torch.softmax(logit / cfg.readout_tau, dim=0)
+        err = p - yoh_t
+        self.W_out -= (cfg.readout_lr * torch.outer(x2, err))
+        self.b_out -= (cfg.readout_lr * err)
+        # 3) 编码器局部学习（在类别推入后的自由态上）
+        self._learn(yoh)
+        self._maybe_cap_w2()
+        return float(torch.linalg.vector_norm(self._e0c))
+
+    def _reduced_input(self, x0_np: np.ndarray) -> torch.Tensor:
+        """压缩输入 x0rf（与 _infer 同口径：pad 一维后按 idx_rf 抽取）。"""
+        x0p = np.concatenate([np.asarray(x0_np).ravel(), np.zeros(1, np.float32)])
+        return torch.as_tensor(x0p, device=self.device)[self.idx_rf]
+
+    def _train_encoder_free(self, x0rf: torch.Tensor, yoh_t: torch.Tensor) -> None:
+        """自由态上以读头类别软误差驱动编码器（train_step_free 的 nudge 分支）。"""
+        cfg = self.cfg
+        nudge = cfg.free_nudge
+        x1g = self._x1g
+        x1 = x1g.reshape(-1)
+        x2 = self._x2
+        # 3) 类别误差软回送编码器（自由态单步 nudge，非硬钳制）
+        logit = torch.mv(self.W_out.t(), x2) + self.b_out
+        err = torch.softmax(logit / cfg.readout_tau, dim=0) - yoh_t
+        g2 = torch.mv(self.W_out, err)                        # (h) dL/dx2（L=CE）
+        # 沿 −grad 推 x2 靠向正确类（减小 CE）
+        x2n = (x2 - nudge * self.et2 * g2).clamp(0.0, cfg.x_max)
+        e1n = x1 - torch.mv(self.W2, x2n)                     # (Wd) 重建误差 toward x2n
+        x1n = (x1 + nudge * self.et1 * e1n).clamp(0.0, cfg.x_max)
+        x1gn = x1n.reshape(self.W, self.per)
+        g1s = (x1gn > cfg.theta_syn).to(x1gn.dtype)
+        g2s = (x2n > cfg.theta_syn).to(x2n.dtype)
+        # 输入重建误差（nudge 后 x1）
+        pred0 = torch.matmul(self.W1c, x1gn.unsqueeze(-1)).squeeze(-1)
+        e0c = x0rf - pred0
+        dW1 = torch.einsum("bi,bj->bij", e0c, x1gn * g1s) * self.s1
+        self.W1c += self.eta_w1 * dW1
+        n = torch.linalg.vector_norm(self.W1c, dim=1, keepdim=True)
+        scale = torch.where(n > 1.0, 1.0 / n.clamp_min(1e-12), torch.ones_like(n))
+        self.W1c *= scale
+        self.W1c[self.pad] = 0.0
+        self.W1c *= self.s1
+        self.W1cT = self.W1c.transpose(1, 2).contiguous()
+        # W2 / W3（W3 以标签为生成目标，语义=自由 x2n 应生成正确 next-byte）
+        dW2 = torch.outer(e1n, x2n * g2s)
+        e2n = x2n - torch.mv(self.W3, yoh_t)
+        dW3 = torch.outer(e2n, yoh_t)
+        self.W2 += self.eta_w2 * dW2
+        self.W3 += self.eta_w3 * dW3
+        self.W2 *= self.m2
+        self.W3 *= self.m3
+        self.W2 = _colnorm_t(self.W2)
+        if cfg.w3_norm == "unit":
+            self.W3 = _colnorm_t(self.W3) * cfg.w3_scale
+        else:
+            n3 = torch.linalg.vector_norm(self.W3, dim=0)
+            cap = cfg.w3_norm_cap
+            over = n3 > cap
+            self.W3[:, over] *= (cap / n3[over].clamp_min(1e-8))
+        self._maybe_cap_w2()
     # 根因（h2_conv 诊断）：SR-PC 在线单样本 Hebbian vs 孪生 batch=32+Adam，
     #  同样本数下相差甚大（1856@300k：acc 0.258/bpc 4.1 vs 孪生 0.42/更好）。
     #  收敛效率代差，非数据量差、非读出判别不足（CE 耦合 300k 验证无效，已弃）。
@@ -393,6 +539,94 @@ class LMPCNg:
         self._ev = self._ev + ((g1.float().mean() + g2.float().mean()) * 0.5
                                - self._ev) * 0.01
 
+    # ------------------------------------------------------------------
+    # H2 对因修复 v5：显式识别编码器 PC（recognition-encoder，2026-09-10）
+    # 诊断（h2_free_sweep + v1-v4 全负）：所有"自由沉降中推类别"机制都受同一结构性
+    #  根因拖累——x2 由生成式沉降经 iters=12 从零自举、开环表征判别不足（DPC 最优也
+    #  只 0.275 vs 孪生 0.42）。孪生(BP) 一次前馈即得判别特征；SR-PC 隐层却依赖
+    #  钳制标签污染态。文献：识别/生成权重孪生绑定是 tPC-RTRL（Potter&Rhodes'26）、
+    #  判别式 PC 的标准结构——识别方向 = 生成权重转置，无需沉降。
+    # 修复：x2 不再沉降自举，而是**一次自底向上前馈编码**：
+    #   x1r = relu(W1cT·x0rf)、x2r = relu(W2T·x1r)；读头在 x2r 上 LMS；再用 CE 梯度
+    #   （识别方向）以局部 outer（post-gradient × pre-activation）收紧编码器权重
+    #   W2/W1c，使生成转置承载判别编码。训练/评估同一路径 → 无 teacher-forcing→free
+    #   失配。免反传、结构稀疏+列归一+W2 谱截断全保留。
+    # ------------------------------------------------------------------
+    def _recog_forward(self, x0_flat_np: np.ndarray) -> None:
+        """识别编码前馈：一次算得判别 x2r（不含沉降、不含钳制）。"""
+        cfg = self.cfg
+        x0rf = self._reduced_input(x0_flat_np)            # (W, per)
+        # x1r = relu(W1cT·x0rf)，逐块(块紧凑，同 _infer 的 u1 口径)
+        x1r = (torch.matmul(self.W1cT, x0rf.unsqueeze(-1)).squeeze(-1)
+               * self.s1)
+        if cfg.recog_act == "relu":
+            x1r = x1r.clamp(0.0, cfg.x_max)
+        else:
+            x1r = torch.tanh(x1r) * 0.5
+        x1r = _kwta2d_t(x1r, cfg.kwta_frac)               # (W, per) 结构稀疏
+        # x2r = relu(W2T·x1r)
+        x2r = torch.mv(self.W2.t(), x1r.reshape(-1))
+        x2r = x2r.clamp(0.0, cfg.x_max)
+        x2r = _kwta_t(x2r, cfg.kwta_frac)                 # (h)
+        self._x1rf, self._x1r, self._x2r = x0rf, x1r, x2r
+        self._ev_recog = (x2r > cfg.theta_syn).float().mean().item()
+
+    def train_step_recog(self, x0_np: np.ndarray, y: int) -> float:
+        """显式识别编码器训练（recog_on，2026-09-10）。"""
+        cfg = self.cfg
+        dev = self.device
+        yoh = np.zeros(self.C, np.float32); yoh[y] = 1.0
+        yoh_t = torch.as_tensor(yoh, device=dev)
+        self._recog_forward(x0_np)
+        x1r, x2r, x0rf = self._x1r, self._x2r, self._x1rf
+        # 1) 读头 LMS（判别真标签，同评估口径）
+        logit = torch.mv(self.W_out.t(), x2r) + self.b_out
+        p = torch.softmax(logit / cfg.readout_tau, dim=0)
+        err = p - yoh_t
+        self.W_out -= (cfg.readout_lr * torch.outer(x2r, err))
+        self.b_out -= (cfg.readout_lr * err)
+        # 2) 编码器局部收紧（CE 梯度经识别方向回送编码权重）
+        g2 = torch.mv(self.W_out, err)                    # (h) dL/dx2
+        #   W2（识别方向 W2T）：dW2 += η·outer(x1r, -g2) => W2T 产出朝降 CE
+        mask2 = (x2r > cfg.theta_syn).to(x2r.dtype)       # 结构稀疏（post 门控）
+        dW2 = torch.outer(x1r.reshape(-1), g2 * mask2)
+        self.W2 -= cfg.recog_lr * dW2
+        #   W1c（识别方向 W1cT）：dL/dx1 = W2·g2，逐块 outer(x0rf, -δ1)
+        g1 = torch.mv(self.W2, g2).reshape(self.W, self.per)
+        mask1 = (x1r > cfg.theta_syn).to(x1r.dtype)
+        dW1c = torch.einsum("bi,bj->bij", x0rf, g1 * mask1) * self.s1
+        self.W1c -= cfg.recog_lr * dW1c
+        # 正则/结构（同 _learn）：列归一 + pad 置零 + s1 尺度 + W1cT 同步
+        n = torch.linalg.vector_norm(self.W1c, dim=1, keepdim=True)
+        self.W1c = self.W1c / n.clamp_min(cfg.w1_norm_eps)
+        self.W1c[self.pad] = 0.0
+        self.W1c *= self.s1
+        self.W1cT = self.W1c.transpose(1, 2).contiguous()
+        self.W2 *= self.m2
+        self.W2 = _colnorm_t(self.W2)
+        self._maybe_cap_w2()
+        # 3) 生成侧同步（可选，recog_refine>0 时用识别态做少量生成收紧，作 W3 学力）
+        n_ = torch.linalg.vector_norm(self._e0c) if hasattr(self, "_e0c") else 0.0
+        return float(n_)
+
+    def eval_recog(self, X_np: np.ndarray, y_np: np.ndarray, tau: float
+                   ) -> tuple[float, float]:
+        """识别编码器评估：同 train_step_recog 的编码路径（无沉降/钳制）。"""
+        self.learning = False
+        nll = acc = 0.0
+        for i in range(len(y_np)):
+            self._recog_forward(X_np[i].ravel())
+            logit = torch.mv(self.W_out.t(), self._x2r) + self.b_out
+            p = torch.softmax(logit / tau, dim=0)
+            py = float(p[y_np[i]])
+            nll -= np.log2(max(py, 1e-12))
+            acc += float(p.argmax().item() == y_np[i])
+        self.learning = True
+        return float(nll / len(y_np)), float(acc / len(y_np))
+
+    def recog_event_rate(self) -> float:
+        return float(getattr(self, "_ev_recog", 0.0))
+
     # ---- 冻结评估：W_out 线性读出头（同 numpy 协议）----
     def eval_batch(self, X_np: np.ndarray, y_np: np.ndarray, tau: float,
                    block_mask: np.ndarray | None = None
@@ -413,7 +647,8 @@ class LMPCNg:
                 taus: tuple) -> float:
         best, best_tau = np.inf, taus[0]
         for tau in taus:
-            bpc, _ = self.eval_batch(X_np, y_np, tau)
+            bpc, _ = (self.eval_recog(X_np, y_np, tau) if self.cfg.recog_on
+                      else self.eval_batch(X_np, y_np, tau))
             if bpc < best:
                 best, best_tau = bpc, tau
         return float(best_tau)

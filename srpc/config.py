@@ -481,6 +481,42 @@ class E2Config:
     #  钳制目标 t3 = (1-ss_eps)·yoh + ss_eps·p̂，clamp 推断与 W3 学习都用 t3，
     #  使生成映射（x2→next-byte）与开环读出一致。0 = 关（旧行为逐位不变）。
     ss_eps: float = 0.0               # scheduled-sampling 混合权重（0 纯教师；先有界挡扫优）
+    # H2 对因修复 v3：自由沉降输出误差 PC（2026-09-10）
+    # 诊断（h2_layerprobe + h2_freebeta，均决定性）：硬 clamp 标签污染状态——训练时
+    #  x3=yoh 被钳死沉降，W1/W2 只学会解读"标签污染态"，自由沉降从 x1 起即塌陷
+    #  （clamp 1.0 vs free x1 0.32 / free x2 0.24）；放大自底向上 β 探针单调降
+    #  （0.242→0.117）证伪"传导力度不足"。CE耦合/batch累积/scheduled sampling
+    #  （300k/300k/90k）均失败，根因=标签经硬 clamp 注入只塑造生成轨迹、开环无判别。
+    # 修复（free_nudge>0，train_step_free）：不硬钳制。单样本先自由沉降得开环态
+    #  x2/free x1，读出头在其上 LMS（同基线），再经局部读头把类别误差
+    #  g2=W_out·err 单步软 nudge x2（x2n），以 x2n 为生成目标重建 e1n 更新 W1/W2、
+    #  并以标签为目标更新 W3（e2n=x2n−W3·yoh）。类别信号仅在自由态上以软误差进入，
+    #  迫使 W1/W2 学会开环判别。0=关（free_nudge=0 走原 clamp train_step，即对照）。
+    free_iters: int = 12              # 自由沉降迭代数（train_step_free 用）
+    free_nudge: float = 0.0           # 读头类别软误差 nudge 强度（0 关=原 clamp 训练）
+    # H2 对因修复 v4：判别式 PC 能量（DPC，Whittington&Bogacz / Salvatori 监督 PC）
+    # 诊断（h2_free_sweep，决定性）：自由沉降训练(nudge)三条都逐字节同值 0.133，
+    #  远低于 clamp 基线 0.23——标签只在沉降【外】事后 nudge，沉降动力学全程无类别
+    #  误差，W 学不到开环判别，自由态坍缩到固定点。v4 修复：把标签回归误差作为
+    #  能量一项，在自由沉降【内部】每步把 x2 软性推向正确类（−∂L_CE/∂x2），让
+    #  W1/W2 在开环路径下也学到判别编码，再读头 LMS + 局部学习更新。0=关（原 clamp）。
+    dpc_amp: float = 0.0              # 沉降内 CE 类别推入强度（0 关=原 clamp 训练）
+    dpc_deep: float = 0.0             # 类别误差下沉 x1 的强度（充分监督 PC；0=只推 x2）
+    # H2 对因修复 v5：显式识别编码器 PC（recognition-encoder PC，2026-09-10）
+    # 诊断（h2_free_sweep + 前四机制全部负结果）：所有"自由沉降中推类别"的机制
+    #  都受同一结构性根因拖累——x2 由生成式沉降经 12 步从零自举、开环表征判别不足
+    #  （DPC 最优也只 0.275 vs 孪生 0.42）。孪生(BP)是一次前馈即得判别特征，
+    #  而 SR-PC 的隐层依赖钳制标签污染态。文献：识别/生成权重孪生绑定是 tPC-RTRL
+    #  （Potter & Rhodes'26）、判别式 PC 的标准结构——识别方向 = 生成权重转置。
+    # 修复（recog_on，train_step_recog）：x2 不再由沉降自举，而是**一次自底向上前馈
+    #   编码**得出 x1 = relu(W1cT·x0rf)、x2 = relu(W2T·x1)，读头在 x2 上 LMS；
+    #   再以该识别态为锚用局部规则收紧生成侧（e0c/e1/e2 重建误差更新 W1c/W2/W3），
+    #   使生成转置恰好承载判别编码。评估【同一路径】无 teacher-forcing→free 失配。
+    #   0=关（走原 clamp 即对照）。结构稀疏+列归一+W2 谱截断全保留。
+    recog_on: bool = False           # 显式识别编码器训练开关
+    recog_refine: int = 0            # 识别编码后生成侧额外沉降迭代数（0=纯前馈编码）
+    recog_act: str = "relu"          # 编码激活："relu"=clamp(0,xmax) / "tanh-like" 备用
+    recog_lr: float = 0.01           # 编码器生成侧同步学习率（收敛>光谱稳定）
     # 学习（锚点值）
     eta_w: float = 0.005               # 锚点网格 {0.005,0.01} 裁定（探针：0.005@24iters 最优）
     theta_syn: float = 1e-2
