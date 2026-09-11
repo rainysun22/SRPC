@@ -1,0 +1,67 @@
+{
+  "stage": "J",
+  "task": "multi-digit borrow subtraction (state tracking)",
+  "rows": [
+    {
+      "N": 2,
+      "acc_state_track": 1.0,
+      "acc_scanall": 0.0025,
+      "acc_myopic_depth1": 0.5225,
+      "e_state_track": 4400,
+      "e_scanall": 576
+    },
+    {
+      "N": 4,
+      "acc_state_track": 1.0,
+      "acc_scanall": 0.0,
+      "acc_myopic_depth1": 0.16,
+      "e_state_track": 8800,
+      "e_scanall": 1280
+    },
+    {
+      "N": 8,
+      "acc_state_track": 1.0,
+      "acc_scanall": 0.0,
+      "acc_myopic_depth1": 0.0275,
+      "e_state_track": 17600,
+      "e_scanall": 3072
+    },
+    {
+      "N": 16,
+      "acc_state_track": 1.0,
+      "acc_scanall": 0.0,
+      "acc_myopic_depth1": 0.0,
+      "e_state_track": 35200,
+      "e_scanall": 8192
+    },
+    {
+      "N": 32,
+      "acc_state_track": 1.0,
+      "acc_scanall": 0.0,
+      "acc_myopic_depth1": 0.0,
+      "e_state_track": 70400,
+      "e_scanall": 24576
+    },
+    {
+      "N": 64,
+      "acc_state_track": 1.0,
+      "acc_scanall": 0.0,
+      "acc_myopic_depth1": 0.0,
+      "e_state_track": 140800,
+      "e_scanall": 81920
+    }
+  ],
+  "energy_fits": {
+    "state_track_slope(N)": 2200.0,
+    "scanall_N2_coef": 20.0,
+    "state_track_loglog_k": 1.0,
+    "scanall_loglog_k": 1.428
+  },
+  "J1_acc_kept_with_depth": true,
+  "J1_scanall_collapses": true,
+  "J2_energy_linear": true,
+  "J2_scanall_quadratic": true,
+  "J3_preview_depth_gain": true,
+  "overall_pass": true,
+  "wall_s": 10.2
+}
