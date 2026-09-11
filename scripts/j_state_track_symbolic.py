@@ -31,17 +31,30 @@ os.makedirs(OUT, exist_ok=True)
 DIGITS = 10
 STATE_D = 8            # A 状态轨道维度（O(1) borrow 的空间嵌入）
 CAP = 16               # B 固定池化容量（重扫模型的瓶颈）
-# A 每步特征 = FST 转移表 (a,b,borrow)->(digit,borrow_out) 的独立表键（查找表）
-FEAT = DIGITS * DIGITS * 2     # (a*10+b)*2 + borrow
+FEATURE_MODE = 'fourier'   # 'fourier' | 'lookup' （前者可学，后者查表）
+
+if FEATURE_MODE == 'lookup':
+    # A 每步特征 = FST 转移表 (a,b,borrow)->(digit,borrow_out) 的独立表键（查找表，全表可学）
+    FEAT = DIGITS * DIGITS * 2     # (a*10+b)*2 + borrow
+    def per_step_feat(ai: int, bi: int, borrow: int) -> np.ndarray:
+        u = np.zeros(FEAT)
+        u[(ai * DIGITS + bi) * 2 + int(borrow)] = 1.0
+        return u
+elif FEATURE_MODE == 'fourier':
+    # A 每步特征 = Z_10 周期特征（表示 mod 10 运算，理论保证可学）＋ 原始差值 s（表示 <0 阈值借位）
+    # digit 读头用周期部分 cc/sin；borrow 读头用线性部分 s；两读头各自局部 LMS 选择所需特征
+    FEAT = 2 * 5 + 1 + 1   # 5k×2 周期 + bias + 原始差值 s
+    def per_step_feat(ai, bi, borrow):
+        s = ai - bi - int(borrow)
+        u = []
+        for k in range(1, 6):
+            u.append(np.cos(2 * np.pi * k * s / 10))
+            u.append(np.sin(2 * np.pi * k * s / 10))
+        u.append(1.0)       # bias
+        u.append(s)         # 线性差值（borrow 阈值用）
+        return np.array(u, float)
 
 rng = np.random.default_rng(0)
-
-
-# 每步特征：独立表键 (a_i,b_i,borrow_out_i)（FST 转移表查找，局部关联可学）
-def per_step_feat(ai: int, bi: int, borrow: int) -> np.ndarray:
-    u = np.zeros(FEAT)
-    u[(ai * DIGITS + bi) * 2 + int(borrow)] = 1.0
-    return u
 
 
 # ----------------------------------------------------------------------
@@ -106,10 +119,11 @@ class StateTracker:
         self.Wr += lr_a * np.outer(u, err)
 
     def learn_borrow(self, u, brd):
+        # 线性阈值 LMS（借位 = (a-b-borrow)<0 的符号，原始差值特征线性可分）
         t = 1.0 if brd > 0 else -1.0
-        pred = np.tanh(u @ self.Wb.squeeze())
-        e = t - pred
-        self.Wb += lr_a * e * u.reshape(-1, 1) * (1 - pred ** 2)
+        lam = u @ self.Wb.squeeze()
+        e = t - np.tanh(lam)
+        self.Wb += lr_a * e * u.reshape(-1, 1) * (1 - np.tanh(lam) ** 2)
 
 
 lr_a = 0.3
